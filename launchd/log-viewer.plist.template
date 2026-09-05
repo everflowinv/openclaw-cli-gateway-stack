@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>__LABEL__</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PYTHON3__</string>
+		<string>__REPO__/live-log-viewer/server.py</string>
+		<string>--file</string>
+		<string>__OPENCLAW_LOG_DIR__/claude-cli-gateway.stdout.log</string>
+		<string>--file</string>
+		<string>__OPENCLAW_LOG_DIR__/antigravity-cli-gateway.stdout.log</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>__OPENCLAW_LOG_DIR__/log-viewer.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__OPENCLAW_LOG_DIR__/log-viewer.err.log</string>
+	<key>WorkingDirectory</key>
+	<string>__REPO__/live-log-viewer</string>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+</dict>
+</plist>

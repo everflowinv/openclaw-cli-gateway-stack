@@ -1,0 +1,64 @@
+# Claude CLI Gateway
+
+Local OpenAI-compatible gateway that runs each request through the official
+Claude CLI subscription path. Claude receives OpenClaw's system prompt and
+conversation, then executes OpenClaw tools through the existing `openclaw` MCP
+proxy before returning the final answer.
+
+The gateway accepts OpenClaw/OpenAI-compatible multimodal user content. Image
+parts are expected as `image_url` data URIs (the format emitted by OpenClaw's
+`openai-completions` transport) and are converted in memory to Claude CLI
+`stream-json` base64 image blocks. Text and images retain their order, including
+images referenced in earlier conversation turns. Supported image MIME types are
+PNG, JPEG, GIF, and WebP. Remote HTTP image URLs are intentionally rejected;
+OpenClaw downloads and inlines image attachments before provider transport.
+
+Claude's final model response remains OpenAI-compatible text/SSE, including
+normal multimodal analysis answers. Claude models do not emit native image
+blocks, and OpenClaw's `openai-completions` transport does not consume image
+blocks in assistant deltas. Generated or tool-produced media therefore returns
+through OpenClaw's existing MCP messaging/media tools rather than the provider
+response body.
+
+Endpoints:
+
+- `GET /health`
+- `GET /v1/models`
+- `POST /v1/chat/completions`
+
+The service binds to `127.0.0.1:4568` by default. It exposes only Claude's
+`ToolSearch` built-in; deferred tools are loaded from `mcp__openclaw__*`, so
+file, shell, messaging, and gateway operations continue to pass through the
+existing OpenClaw MCP proxy.
+
+OpenClaw registers this endpoint as the separate `claude-cli-gateway`
+provider. Keep that id distinct from OpenClaw's auto-discovered native
+`claude-cli` model catalog.
+
+Service operations:
+
+- Health: `curl -s http://127.0.0.1:4568/health`
+- Restart: `launchctl kickstart -k gui/$UID/ai.openclaw.claude-cli-gateway`
+- Logs: `~/.openclaw/logs/claude-cli-gateway.{stdout,stderr}.log`
+- Live viewer: `http://127.0.0.1:8765` (structured `[CLIGW]` request,
+  thinking, text, tool, completion, cancellation, and error events are written
+  to the stdout log)
+
+Environment controls:
+
+- `CLAUDE_CLI_GATEWAY_PORT` (default `4568`)
+- `CLAUDE_CLI_GATEWAY_MAX_CONCURRENT` (default `4`)
+- `CLAUDE_CLI_GATEWAY_QUEUE_TIMEOUT_SECONDS` (default `120`)
+- `CLAUDE_CLI_GATEWAY_TIMEOUT_SECONDS` (default `3600`)
+- `CLAUDE_CLI_GATEWAY_MAX_TURNS` (default `200`)
+- `CLAUDE_CLI_GATEWAY_EXEC_MAX_TIMEOUT_MS` (default `600000` = 10 min; per-call
+  ceiling passed to the openclaw MCP proxy as
+  `OPENCLAW_MCP_LOCAL_TOOL_MAX_TIMEOUT_MS`, capping `exec`/`process` even when
+  the model requests a larger `timeoutMs`. Timing out returns a tool error with
+  partial output so the model can retry or move the work to a background
+  `process` session)
+- `CLAUDE_CLI_GATEWAY_MAX_BODY_MB` (default `64`, encoded HTTP request)
+- `CLAUDE_CLI_GATEWAY_MAX_IMAGES` (default `20`)
+- `CLAUDE_CLI_GATEWAY_MAX_IMAGE_MB` (default `10` per image)
+- `CLAUDE_CLI_GATEWAY_MAX_TOTAL_IMAGE_MB` (default `20` decoded total)
+- `CLAUDE_CLI_GATEWAY_API_KEY` (optional local bearer token)

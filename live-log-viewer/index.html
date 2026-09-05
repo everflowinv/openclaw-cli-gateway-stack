@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CLI Gateway Logs</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d1117; color: #c9d1d9; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; height: 100vh; display: flex; flex-direction: column; }
+  #header { background: #161b22; border-bottom: 1px solid #30363d; padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+  #header h1 { font-size: 14px; font-weight: 600; color: #58a6ff; white-space: nowrap; }
+  #tabs { display: flex; gap: 6px; }
+  .tab { background: #21262d; border: 1px solid #30363d; color: #8b949e; padding: 3px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-family: inherit; white-space: nowrap; }
+  .tab:hover { background: #30363d; color: #c9d1d9; }
+  .tab.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  .tab .badge { display: inline-block; min-width: 14px; text-align: center; margin-left: 6px; padding: 0 4px; border-radius: 8px; background: #da3633; color: #fff; font-size: 10px; font-weight: 700; }
+  .tab.active .badge { background: #fff; color: #1f6feb; }
+  #filename { color: #8b949e; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #status { font-size: 12px; padding: 2px 8px; border-radius: 12px; background: #1a3a1a; color: #3fb950; border: 1px solid #238636; white-space: nowrap; }
+  #status.error { background: #3a1a1a; color: #f85149; border-color: #da3633; }
+  #controls { display: flex; gap: 8px; }
+  button { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-family: inherit; }
+  button:hover { background: #30363d; }
+  button.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  #filter-bar { background: #161b22; border-bottom: 1px solid #30363d; padding: 8px 16px; display: flex; gap: 8px; flex-shrink: 0; }
+  #filter { flex: 1; background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 5px 10px; border-radius: 6px; font-family: inherit; font-size: 12px; }
+  #filter:focus { outline: none; border-color: #58a6ff; }
+  #filter::placeholder { color: #484f58; }
+  #session-filter { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 5px 8px; border-radius: 6px; font-family: inherit; font-size: 12px; max-width: 220px; }
+  #log-root { flex: 1; overflow-y: auto; padding: 8px 0; }
+  .log-container { display: none; }
+  .log-container.active { display: block; }
+  .item { padding: 2px 16px 2px 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; border-left: 3px solid transparent; }
+  .item:hover { background: #161b22; }
+  .item.session-header { color: #e3b341; background: #1c2128; margin-top: 6px; font-weight: 600; }
+  .item.meta { color: #8b949e; font-size: 12px; }
+  .item.meta.error { color: #f85149; }
+  .item.text-block { color: #c9d1d9; }
+  .item.thinking-block { color: #8b949e; }
+  .thinking-label { cursor: pointer; color: #a371f7; user-select: none; }
+  .thinking-label:hover { text-decoration: underline; }
+  .thinking-body { display: none; margin-top: 4px; padding: 6px 10px; background: #161b22; border-radius: 6px; color: #8b949e; font-style: italic; }
+  .thinking-block.expanded .thinking-body { display: block; }
+  .session-chip { display: inline-block; font-size: 10px; padding: 0 6px; border-radius: 8px; margin-right: 8px; vertical-align: 1px; color: #0d1117; font-weight: 700; }
+  #stats { background: #161b22; border-top: 1px solid #30363d; padding: 5px 16px; font-size: 11px; color: #8b949e; flex-shrink: 0; display: flex; gap: 16px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>📋 Gateway Logs</h1>
+  <div id="tabs"></div>
+  <span id="filename">Loading...</span>
+  <span id="status">Connecting...</span>
+  <div id="controls">
+    <button id="btn-follow" class="active" onclick="toggleFollow()">Follow</button>
+    <button onclick="clearView()">Clear</button>
+    <button onclick="downloadLog()">Download</button>
+  </div>
+</div>
+<div id="filter-bar">
+  <select id="session-filter" onchange="applyFilter()">
+    <option value="">All requests</option>
+  </select>
+  <input id="filter" type="text" placeholder="Filter rendered text... (regex supported)" oninput="applyFilter()">
+  <button onclick="document.getElementById('filter').value=''; document.getElementById('session-filter').value=''; applyFilter()">Clear Filter</button>
+</div>
+<div id="log-root"></div>
+<div id="stats">
+  <span id="stat-lines">Lines: 0</span>
+  <span id="stat-shown">Shown: 0</span>
+  <span id="stat-sessions">Requests: 0</span>
+  <span id="stat-errors">Errors: 0</span>
+  <span id="stat-scroll">Scroll: bottom</span>
+</div>
+
+<script>
+  const MAX_RAW_LINES = 5000;   // raw log buffer per source (Download)
+  const MAX_ITEMS = 2000;       // rendered DOM items per source
+
+  const logRoot = document.getElementById('log-root');
+  const statusEl = document.getElementById('status');
+  const PALETTE = ['#58a6ff', '#3fb950', '#e3b341', '#f778ba', '#a371f7', '#f0883e', '#39c5cf', '#ff7b72'];
+
+  let sources = [];             // [{id,label,file,el,state...}]
+  let active = null;            // active source object
+
+  // ───────── follow logic: only real user input disables it ─────────
+  // #log-root is the single scrollable element (per-source containers are
+  // plain blocks inside it); all scrollTop math must target logRoot itself.
+  let following = true;
+  function setFollowing(v) {
+    if (following === v) return;
+    following = v;
+    document.getElementById('btn-follow').classList.toggle('active', v);
+  }
+  function toggleFollow() {
+    setFollowing(!following);
+    if (following) logRoot.scrollTop = logRoot.scrollHeight;
+  }
+  let scrollScheduled = false;
+  function scheduleScroll() {
+    if (!following || scrollScheduled) return;
+    scrollScheduled = true;
+    requestAnimationFrame(() => {
+      scrollScheduled = false;
+      if (following) logRoot.scrollTop = logRoot.scrollHeight;
+    });
+  }
+  logRoot.addEventListener('wheel', (e) => { if (e.deltaY < 0) setFollowing(false); }, { passive: true });
+  logRoot.addEventListener('touchmove', () => setFollowing(false), { passive: true });
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    if (['ArrowUp', 'PageUp', 'Home'].includes(e.key)) setFollowing(false);
+    if (['End'].includes(e.key)) setFollowing(true);
+  });
+  // scrolling back to the bottom re-enables follow
+  function updateScrollStat() {
+    const distance = logRoot.scrollHeight - logRoot.scrollTop - logRoot.clientHeight;
+    document.getElementById('stat-scroll').textContent = distance < 30 ? 'Scroll: bottom' : `Scroll: +${Math.round(distance)}px`;
+  }
+  logRoot.addEventListener('scroll', () => {
+    const atBottom = logRoot.scrollHeight - logRoot.scrollTop - logRoot.clientHeight < 30;
+    if (atBottom && !following) setFollowing(true);
+    updateScrollStat();
+  });
+  updateScrollStat();
+
+  // ───────── per-source rendering (identical format for every gateway) ─────────
+  function newSourceState() {
+    return {
+      allLines: [],             // raw lines, for Download
+      items: [],                // rendered items: {el, session, getText()}
+      sessions: new Map(),      // tag8 -> {color, openBlock}
+      errorCount: 0,
+      unseenErrors: 0,
+      lastSeq: null,
+      lastActivity: Date.now(),
+      es: null,
+      reconnectTimer: null,
+    };
+  }
+
+  function getSession(src, tag) {
+    const st = src.state;
+    if (!st.sessions.has(tag)) {
+      const color = PALETTE[st.sessions.size % PALETTE.length];
+      st.sessions.set(tag, { color, openBlock: null });
+      if (src === active) {
+        const opt = document.createElement('option');
+        opt.value = tag;
+        opt.textContent = tag;
+        document.getElementById('session-filter').appendChild(opt);
+        updateStats(src);
+      }
+    }
+    return st.sessions.get(tag);
+  }
+
+  function chip(tag, color) {
+    const c = document.createElement('span');
+    c.className = 'session-chip';
+    c.style.background = color;
+    c.textContent = tag;
+    return c;
+  }
+
+  function pushItem(src, el, sessionTag, getText) {
+    const st = src.state;
+    const item = { el, session: sessionTag, getText };
+    st.items.push(item);
+    if (!itemVisible(st, item)) el.classList.add('hidden');
+    src.container.appendChild(el);
+    while (st.items.length > MAX_ITEMS) {
+      const old = st.items.shift();
+      // if a trimmed element is some session's open block, detach it cleanly
+      for (const s of st.sessions.values()) {
+        if (s.openBlock && s.openBlock.el === old.el) s.openBlock = null;
+      }
+      old.el.remove();
+    }
+    if (src === active) { updateShown(src); scheduleScroll(); }
+    return item;
+  }
+
+  function itemVisible(st, item) {
+    if (sessionFilter && item.session !== sessionFilter) return false;
+    if (filterRegex && !filterRegex.test(item.getText())) return false;
+    return true;
+  }
+
+  function updateShown(src) {
+    let shown = 0;
+    for (const it of src.state.items) if (!it.el.classList.contains('hidden')) shown++;
+    if (src === active) document.getElementById('stat-shown').textContent = `Shown: ${shown}`;
+  }
+
+  function refreshItemVisibility(src, item) {
+    item.el.classList.toggle('hidden', !itemVisible(src.state, item));
+  }
+
+  function closeBlock(sess) { sess.openBlock = null; }
+
+  function appendThinking(src, tag, text) {
+    const sess = getSession(src, tag);
+    let b = sess.openBlock;
+    if (!b || b.kind !== 'thinking') {
+      const el = document.createElement('div');
+      el.className = 'item thinking-block';
+      el.style.borderLeftColor = sess.color;
+      el.appendChild(chip(tag, sess.color));
+      const label = document.createElement('span');
+      label.className = 'thinking-label';
+      const body = document.createElement('div');
+      body.className = 'thinking-body';
+      label.onclick = () => el.classList.toggle('expanded');
+      el.appendChild(label);
+      el.appendChild(body);
+      b = { kind: 'thinking', el, label, body, count: 0, chars: 0, text: '' };
+      sess.openBlock = b;
+      b.item = pushItem(src, el, tag, () => '[thinking] ' + b.text);
+    }
+    b.count++;
+    b.chars += text.length;
+    b.text += text;
+    b.body.textContent = b.text;
+    b.label.textContent = `▸ thinking ×${b.count} (${b.chars >= 1000 ? (b.chars / 1000).toFixed(1) + 'k' : b.chars} chars)`;
+    refreshItemVisibility(src, b.item);
+    if (src === active) scheduleScroll();
+  }
+
+  function appendText(src, tag, text) {
+    const sess = getSession(src, tag);
+    let b = sess.openBlock;
+    if (!b || b.kind !== 'text') {
+      const el = document.createElement('div');
+      el.className = 'item text-block';
+      el.style.borderLeftColor = sess.color;
+      el.appendChild(chip(tag, sess.color));
+      const span = document.createElement('span');
+      el.appendChild(span);
+      b = { kind: 'text', el, span, text: '' };
+      sess.openBlock = b;
+      b.item = pushItem(src, el, tag, () => b.text);
+    }
+    b.text += text;
+    b.span.textContent = b.text;
+    refreshItemVisibility(src, b.item);
+    if (src === active) scheduleScroll();
+  }
+
+  function appendHeader(src, tag, text, isErrorish) {
+    const sess = getSession(src, tag);
+    closeBlock(sess);
+    const el = document.createElement('div');
+    const isModelLine = /(^| )model=/.test(text);
+    el.className = 'item ' + (isModelLine ? 'session-header' : 'meta' + (isErrorish ? ' error' : ''));
+    el.style.borderLeftColor = sess.color;
+    el.appendChild(chip(tag, sess.color));
+    el.appendChild(document.createTextNode(text));
+    if (isErrorish) {
+      src.state.errorCount++;
+      if (src !== active) {
+        src.state.unseenErrors++;
+        renderTabBadge(src);
+      }
+      if (src === active) updateStats(src);
+    }
+    pushItem(src, el, tag, () => text);
+  }
+
+  // ───────── log line parsing (shared by all gateways) ─────────
+  const PREFIX_RE = /^\[[A-Z0-9]+GW\] /;
+
+  function processLine(src, raw) {
+    if (raw == null || raw === '') return;
+    const st = src.state;
+    st.allLines.push(raw);
+    if (st.allLines.length > MAX_RAW_LINES) st.allLines.shift();
+    if (src === active) document.getElementById('stat-lines').textContent = `Lines: ${st.allLines.length}`;
+
+    if (!PREFIX_RE.test(raw)) return;
+    let obj;
+    try { obj = JSON.parse(raw.replace(PREFIX_RE, '')); }
+    catch (e) { return; }
+    if (!obj || !obj.event) return;
+
+    const tag = obj.request || '(gateway)';
+    if (obj.event === 'thinking' && typeof obj.text === 'string') {
+      appendThinking(src, tag, obj.text);
+    } else if (obj.event === 'text' && typeof obj.text === 'string') {
+      appendText(src, tag, obj.text);
+    } else if (obj.event === 'block_stop') {
+      if (st.sessions.has(tag)) closeBlock(st.sessions.get(tag));
+    } else if (obj.event === 'start') {
+      const session = obj.session ? ` session=${obj.session}` : '';
+      const effort = obj.effort ? ` effort=${obj.effort}` : '';
+      const images = obj.images != null ? ` images=${obj.images}` : '';
+      appendHeader(src, tag, `model=${obj.model}${effort} stream=${Boolean(obj.stream)}${images}${session}`, false);
+    } else if (obj.event === 'init') {
+      const init = [];
+      if (obj.permissionMode) init.push(`permissions=${obj.permissionMode}`);
+      if (obj.toolCount != null) init.push(`tools=${obj.toolCount}`);
+      appendHeader(src, tag, `init${init.length ? ' ' + init.join(' ') : ''}`, false);
+    } else if (obj.event === 'tool') {
+      const args = obj.args ? ` ${obj.args}` : '';
+      const via = obj.via ? ` (via ${obj.via})` : '';
+      appendHeader(src, tag, `tool=${obj.name || 'unknown'}${obj.toolUseId ? ` id=${obj.toolUseId}` : ''}${args}${via}`, false);
+    } else if (obj.event === 'tool_done') {
+      const dur = Number.isFinite(obj.durationMs) ? ` ${obj.durationMs}ms` : '';
+      const out = obj.output ? ` → ${obj.output}` : '';
+      appendHeader(src, tag, `✓ ${obj.name || 'unknown'}${dur}${out}`, false);
+    } else if (obj.event === 'tool_error') {
+      appendHeader(src, tag, `tool_error=${obj.name || 'unknown'}${obj.error ? `: ${obj.error}` : ''}${obj.args ? ` args=${obj.args}` : ''}`, true);
+    } else if (obj.event === 'done') {
+      const usage = obj.usage || {};
+      const tokens = Number.isFinite(usage.total_tokens) ? ` tokens=${usage.total_tokens}` : '';
+      appendHeader(src, tag, `done duration=${formatDuration(obj.durationMs)}${tokens}`, false);
+    } else if (obj.event === 'error') {
+      appendHeader(src, tag, `error${obj.code ? ` code=${obj.code}` : ''}: ${obj.message || 'unknown error'}`, true);
+    } else if (obj.event === 'cancel') {
+      appendHeader(src, tag, `cancelled duration=${formatDuration(obj.durationMs)}`, false);
+    }
+  }
+
+  function formatDuration(ms) {
+    if (!Number.isFinite(ms)) return '?';
+    if (ms < 1000) return `${ms}ms`;
+    return `${(ms / 1000).toFixed(1)}s`;
+  }
+
+  // ───────── tabs / stats / controls ─────────
+  let filterRegex = null;
+  let sessionFilter = '';
+
+  function renderTabBadge(src) {
+    const badge = src.tabEl.querySelector('.badge');
+    if (src.state.unseenErrors > 0) {
+      badge.textContent = src.state.unseenErrors;
+      badge.style.display = 'inline-block';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  function switchTab(src) {
+    if (src === active) return;
+    active = src;
+    for (const s of sources) {
+      s.tabEl.classList.toggle('active', s === src);
+      s.container.classList.toggle('active', s === src);
+    }
+    src.state.unseenErrors = 0;
+    renderTabBadge(src);
+    document.getElementById('filename').textContent = src.file || '';
+    // session dropdown is per-source: rebuild from this source's sessions
+    const requestSelect = document.getElementById('session-filter');
+    requestSelect.innerHTML = '<option value="">All requests</option>';
+    for (const tag of src.state.sessions.keys()) {
+      const opt = document.createElement('option');
+      opt.value = tag;
+      opt.textContent = tag;
+      requestSelect.appendChild(opt);
+    }
+    requestSelect.value = '';
+    sessionFilter = '';
+    updateStats(src);
+    for (const it of src.state.items) it.el.classList.toggle('hidden', !itemVisible(src.state, it));
+    updateShown(src);
+    if (following) logRoot.scrollTop = logRoot.scrollHeight;
+  }
+
+  function updateStats(src) {
+    if (src !== active) return;
+    document.getElementById('stat-lines').textContent = `Lines: ${src.state.allLines.length}`;
+    document.getElementById('stat-sessions').textContent = `Requests: ${src.state.sessions.size}`;
+    document.getElementById('stat-errors').textContent = `Errors: ${src.state.errorCount}`;
+    updateShown(src);
+  }
+
+  function applyFilter() {
+    if (!active) return;
+    const val = document.getElementById('filter').value.trim();
+    try { filterRegex = val ? new RegExp(val, 'i') : null; }
+    catch (e) { filterRegex = null; }
+    sessionFilter = document.getElementById('session-filter').value;
+    for (const it of active.state.items) it.el.classList.toggle('hidden', !itemVisible(active.state, it));
+    updateShown(active);
+    scheduleScroll();
+  }
+
+  function clearView() {
+    if (!active) return;
+    const st = active.state;
+    st.allLines = [];
+    st.items = [];
+    st.errorCount = 0;
+    st.unseenErrors = 0;
+    active.container.innerHTML = '';
+    st.sessions.clear();
+    renderTabBadge(active);
+    const requestSelect = document.getElementById('session-filter');
+    requestSelect.innerHTML = '<option value="">All requests</option>';
+    requestSelect.value = '';
+    sessionFilter = '';
+    document.getElementById('stat-lines').textContent = 'Lines: 0';
+    document.getElementById('stat-shown').textContent = 'Shown: 0';
+    document.getElementById('stat-sessions').textContent = 'Requests: 0';
+    document.getElementById('stat-errors').textContent = 'Errors: 0';
+  }
+
+  function downloadLog() {
+    if (!active) return;
+    const blob = new Blob([active.state.allLines.join('\n')], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${active.id}-live.log`;
+    a.click();
+  }
+
+  // ───────── connections (one SSE per source, all live simultaneously) ─────────
+  // Backlog comes through the stream itself (server replays history on
+  // connect; ?since=<seq> resumes without gaps or duplicates). A watchdog
+  // forces a reconnect when neither data nor a server ping (every 10s)
+  // arrives — an open-but-dead SSE socket must never require a manual refresh.
+  function connect(src) {
+    const st = src.state;
+    if (st.reconnectTimer) { clearTimeout(st.reconnectTimer); st.reconnectTimer = null; }
+    if (st.es) st.es.close();
+    st.lastActivity = Date.now();
+    if (src === active) {
+      statusEl.textContent = 'Connecting...';
+      statusEl.className = '';
+    }
+
+    const since = st.lastSeq != null ? `&since=${st.lastSeq}` : '';
+    st.es = new EventSource(`/stream?source=${encodeURIComponent(src.id)}${since}`);
+    st.es.onopen = () => {
+      st.lastActivity = Date.now();
+      if (src === active) { statusEl.textContent = '● Live'; statusEl.className = ''; }
+    };
+    st.es.onmessage = (e) => {
+      st.lastActivity = Date.now();
+      if (e.lastEventId) st.lastSeq = parseInt(e.lastEventId, 10);
+      if (e.data) processLine(src, e.data);
+    };
+    st.es.addEventListener('ping', () => { st.lastActivity = Date.now(); });
+    st.es.addEventListener('meta', (e) => {
+      st.lastActivity = Date.now();
+      try {
+        const meta = JSON.parse(e.data);
+        if (meta.file && !src.file) src.file = meta.file;
+        if (src === active) document.getElementById('filename').textContent = meta.file || src.file || '';
+      } catch (err) {}
+    });
+    st.es.onerror = () => {
+      if (src === active) {
+        statusEl.textContent = '● Disconnected';
+        statusEl.className = 'error';
+      }
+      st.es.close();
+      st.reconnectTimer = setTimeout(() => connect(src), 3000);
+    };
+  }
+
+  setInterval(() => {
+    for (const src of sources) {
+      if (Date.now() - src.state.lastActivity > 30000) {
+        if (src === active) {
+          statusEl.textContent = '● Stale, reconnecting...';
+          statusEl.className = 'error';
+        }
+        connect(src);
+      }
+    }
+  }, 5000);
+
+  // ───────── boot: fetch sources, build tabs + containers, connect all ─────────
+  fetch('/sources').then((r) => r.json()).then((list) => {
+    const tabs = document.getElementById('tabs');
+    for (const info of list) {
+      const src = {
+        id: info.id,
+        label: info.label,
+        file: info.file,
+        state: newSourceState(),
+        container: null,
+        tabEl: null,
+      };
+
+      const tab = document.createElement('button');
+      tab.className = 'tab';
+      tab.textContent = info.label;
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.style.display = 'none';
+      tab.appendChild(badge);
+      tab.onclick = () => switchTab(src);
+      tabs.appendChild(tab);
+      src.tabEl = tab;
+
+      const container = document.createElement('div');
+      container.className = 'log-container';
+      logRoot.appendChild(container);
+      src.container = container;
+
+      sources.push(src);
+      connect(src);
+    }
+    if (sources.length) switchTab(sources[0]);
+  }).catch(() => {
+    statusEl.textContent = '● Failed to load sources';
+    statusEl.className = 'error';
+  });
+</script>
+</body>
+</html>

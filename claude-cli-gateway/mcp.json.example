@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "openclaw": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["<ABSOLUTE_PATH_TO_YOUR_OPENCLAW_MCP_BRIDGE>/server.js"]
+    }
+  }
+}
