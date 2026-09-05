@@ -368,9 +368,10 @@ function normalizedUsage(usage) {
   };
 }
 
-// agy reports the true cache split (input_tokens already includes
-// cache_read_tokens; thinking is billed as output). Kept alongside the
-// normalized OpenAI-style usage so downstream stats can price exactly.
+// agy reports the true cache split: input_tokens EXCLUDES cache_read_tokens
+// (total = input + cache_read + output + thinking; thinking billed as output).
+// Kept alongside the normalized OpenAI-style usage (prompt = input + cache_read)
+// so downstream stats can price exactly.
 function rawUsage(usage) {
   if (!usage || typeof usage !== "object") return undefined;
   return {

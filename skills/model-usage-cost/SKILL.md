@@ -46,7 +46,7 @@ bash skills/model-usage-cost/scripts/run.sh self-test
 |---|---|---|---|---|
 | 1 | codex rollouts | `~/.openclaw/agents/*/agent/codex-home/sessions/**`、`~/.openclaw/acpx/codex-home/sessions/**`、`~/.codex/sessions/**` | OpenClaw 与手动 Codex CLI 的 OpenAI 模型 | `token_count` 事件，模型取自 `turn_context` |
 | 1 | claude-cli-gateway live log | `~/.openclaw/logs/claude-cli-gateway.stdout.log` | OpenClaw 的 Claude 模型 | 每请求一条 `done` 带 usage；gateway 的 `normalizedUsage()` 会压平缓存拆分，所以这里按比例估算（见下） |
-| 1 | antigravity-cli-gateway live log | `~/.openclaw/logs/antigravity-cli-gateway.stdout.log` | OpenClaw 的 Antigravity 模型 | 每请求一条 `done`；2026-09-05 起 `usage_raw` 带 agy 真实拆分（fresh=input−cacheRead，out=output+thinking），更早的事件按全 fresh 回溯 |
+| 1 | antigravity-cli-gateway live log | `~/.openclaw/logs/antigravity-cli-gateway.stdout.log` | OpenClaw 的 Antigravity 模型 | 每请求一条 `done`；2026-09-05 起 `usage_raw` 带 agy 真实拆分（fresh=input，cacheR=cache_read，out=output+thinking），更早的事件按全 fresh 回溯 |
 | 2 | OpenClaw trajectories | `~/.openclaw/agents/*/sessions/*.trajectory.jsonl` | 其余所有 provider（google/xai/deepseek/qwen/zai/…），缓存拆分真实 | 按 `(traceId,runId,seq,ts)` 去重取 max total；跳过 openai/claude-cli-gateway/antigravity-cli-gateway（已由上面覆盖） |
 | 2 | Claude Code 本地会话 | `~/.claude/projects/*/*.jsonl` | 手动 Claude Code CLI | 缓存拆分真实，同时是 gateway 拆分比例的标定源 |
 

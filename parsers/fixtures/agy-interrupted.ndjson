@@ -1,0 +1,4 @@
+{"event":"init","conversation_id":"c2","init":{"model":"gemini-3.8-flash","tools":["call_mcp_tool"],"permission_mode":"always-proceed"}}
+{"event":"step_update","step_update":{"conversation_id":"c2","step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"完整答案第一段。"}}
+{"event":"step_update","step_update":{"conversation_id":"c2","step_index":2,"state":"DONE","step_type":"agent_response","text_delta":"答案第二段收尾。"}}
+{"event":"result","result":{"conversation_id":"c2","status":"ERROR","response":"完整答案第一段。答案第二段收尾。","error":"The stream was interrupted. Please continue the task you were working on.","duration_seconds":376,"num_turns":3,"usage":{"input_tokens":5000,"output_tokens":100,"thinking_tokens":0,"cache_read_tokens":2000,"total_tokens":7100}}}

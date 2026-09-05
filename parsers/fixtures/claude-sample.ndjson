@@ -1,0 +1,9 @@
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}}
+{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"thinking"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"considering the request"}}}
+{"type":"stream_event","event":{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_01ABC","name":"mcp__openclaw__exec","input":{"command":"echo hi"}}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01ABC","content":"hi"}]}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"The command printed hi."}}}
+{"type":"result","subtype":"success","is_error":false,"result":"The command printed hi.","usage":{"input_tokens":1000,"cache_creation_input_tokens":200,"cache_read_input_tokens":8000,"output_tokens":42}}

@@ -48,6 +48,7 @@ the official CLIs behind a tiny local gateway means:
 | `claude-cli-gateway/` | OpenAI-compatible façade over `claude -p --stream-json`; concurrency/queue/timeout limits; watchdog heartbeats for OpenClaw's stuck-session detector | 4568 |
 | `antigravity-cli-gateway/` | Same idea over `agy` headless print mode; reasoning-effort passthrough (`reasoning_effort` → `--effort`), stall watchdog, degraded-success salvage (an interrupted stream that still carries the full text is returned, not discarded) | 4569 |
 | `live-log-viewer/` | Python SSE server + one HTML page with a tab per gateway: per-request blocks, thinking/text, tool calls with arguments/outputs, regex + session filters, follow mode, download | 8765 |
+| `parsers/` | Standalone, dependency-free modules that parse each CLI's headless stream-json output (plus fixtures + self-test) — reusable without the gateways, with protocol notes | — |
 | `skills/model-usage-cost/` | OpenClaw skill: per-model token usage and list-price cost across 1D/7D/30D windows, merging codex rollouts, both gateway logs, OpenClaw trajectories and local Claude Code sessions | — |
 | `launchd/` | macOS LaunchAgent templates + `install.sh` | — |
 

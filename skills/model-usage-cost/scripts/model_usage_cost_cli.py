@@ -254,11 +254,12 @@ def scan_agy_gateway(agg, prices):
             mdl = startmodel.pop(r, None) or "unknown"
             raw = o.get("usage_raw")
             if isinstance(raw, dict) and "input_tokens" in raw:
-                # agy truth: input includes cache_read; thinking billed as output
+                # agy truth: input EXCLUDES cache_read (total=input+cr+out+think);
+                # thinking is billed as output
                 cr = raw.get("cache_read_tokens", 0) or 0
                 inp = raw.get("input_tokens", 0) or 0
                 agg.add(ts, ("openclaw", "antigravity-cli-gateway", mdl),
-                        fresh=max(inp - cr, 0), cw=0, cr=cr,
+                        fresh=inp, cw=0, cr=cr,
                         out=(raw.get("output_tokens", 0) or 0) + (raw.get("thinking_tokens", 0) or 0))
             else:
                 # historical events carry only the flattened OpenAI-style usage
