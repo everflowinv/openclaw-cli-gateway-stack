@@ -32,7 +32,16 @@ file, shell, messaging, and gateway operations continue to pass through the
 existing OpenClaw MCP proxy.
 
 OpenClaw registers this endpoint as the separate `claude-cli-gateway`
-provider. Keep that id distinct from OpenClaw's auto-discovered native
+provider.
+
+Since 2026-09-05 the gateway also:
+
+- passes OpenAI `reasoning_effort` through to `claude -p --effort`
+  (low/medium/high/xhigh/max; `none`/`off` are ignored; anything else is a
+  400 with the valid list), and
+- reports usage with a real cache split (`prompt_tokens_details.cached_tokens`
+  + `cache_creation_input_tokens`, OpenAI-style) so OpenClaw prices cache
+  reads at the cache rate instead of full input price. Keep that id distinct from OpenClaw's auto-discovered native
 `claude-cli` model catalog.
 
 Service operations:
@@ -46,6 +55,8 @@ Service operations:
 
 Environment controls:
 
+- `CLAUDE_CLI_GATEWAY_WORKSPACE` / `OPENCLAW_WORKSPACE` (default
+  `~/.openclaw/workspace`) — workspace dir passed as the CLI cwd
 - `CLAUDE_CLI_GATEWAY_PORT` (default `4568`)
 - `CLAUDE_CLI_GATEWAY_MAX_CONCURRENT` (default `4`)
 - `CLAUDE_CLI_GATEWAY_QUEUE_TIMEOUT_SECONDS` (default `120`)

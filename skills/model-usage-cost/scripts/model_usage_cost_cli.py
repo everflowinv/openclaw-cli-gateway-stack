@@ -43,7 +43,7 @@ DEFAULT_SPLIT = (0.005, 0.065, 0.93)  # gateway prompt total -> fresh, cacheWrit
 SKIP_TRAJ_PROVIDERS = ("openai", "claude-cli-gateway", "antigravity-cli-gateway")  # covered by A/B/E
 
 NOTES = [
-    "claude-cli-gateway 的 fresh/cacheW/cacheR 为估算拆分（标 * 行），比例可用 --split 调整；精确值以 Anthropic 账单为准。",
+    "claude-cli-gateway 自 2026-09-05 起对带 prompt_tokens_details 的事件用真实缓存拆分；更早的事件仍按 --split 比例估算（标 * 行）。",
     "antigravity-cli-gateway 自 2026-09-05 起用 agy 原始 usage 真实拆分（fresh/cacheR/out）；更早的 done 事件无拆分，按全 fresh 回溯，略微高估。",
     "codex rollout 不区分 cache write，该项按 fresh input 计价，略微高估。",
     "openai 侧为本地 rollout 口径（下限）；云端 account/usage 才是权威口径。",
@@ -216,10 +216,20 @@ def scan_gateway(agg, split):
             if ts is None or ts < agg.widest_cut:
                 continue
             u = o.get("usage") or {}
-            prompt = u.get("prompt_tokens", 0) or 0
-            agg.add(ts, ("openclaw", "claude-cli-gateway", startmodel.pop(r, None) or "unknown"),
-                    fresh=int(prompt * split[0]), cw=int(prompt * split[1]),
-                    cr=int(prompt * split[2]), out=u.get("completion_tokens", 0) or 0)
+            det = (u.get("prompt_tokens_details") or {}).get("cached_tokens")
+            mdl = startmodel.pop(r, None) or "unknown"
+            if isinstance(det, (int, float)):
+                # gateway 2026-09-05+: true cache split from claude CLI usage
+                cr = int(det)
+                cw = int(u.get("cache_creation_input_tokens", 0) or 0)
+                agg.add(ts, ("openclaw", "claude-cli-gateway", mdl),
+                        fresh=max(int(u.get("prompt_tokens", 0) or 0) - cr, 0),
+                        cw=cw, cr=cr, out=u.get("completion_tokens", 0) or 0)
+            else:
+                prompt = u.get("prompt_tokens", 0) or 0
+                agg.add(ts, ("openclaw", "claude-cli-gateway", mdl),
+                        fresh=int(prompt * split[0]), cw=int(prompt * split[1]),
+                        cr=int(prompt * split[2]), out=u.get("completion_tokens", 0) or 0)
 
 
 def strip_effort_suffix(model, prices):

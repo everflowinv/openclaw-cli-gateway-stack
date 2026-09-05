@@ -363,6 +363,7 @@ function normalizedUsage(usage) {
   const completionTokens = Number(usage.output_tokens || 0) + Number(usage.thinking_tokens || 0);
   return {
     prompt_tokens: promptTokens,
+    prompt_tokens_details: { cached_tokens: Number(usage.cache_read_tokens || 0) },
     completion_tokens: completionTokens,
     total_tokens: promptTokens + completionTokens,
   };

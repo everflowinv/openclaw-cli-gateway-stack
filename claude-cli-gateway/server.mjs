@@ -8,6 +8,7 @@ import path from "node:path";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE = process.env.CLAUDE_CLI_GATEWAY_WORKSPACE
+  || process.env.OPENCLAW_WORKSPACE
   || path.join(os.homedir(), ".openclaw", "workspace");
 const HOST = process.env.CLAUDE_CLI_GATEWAY_HOST || "127.0.0.1";
 const PORT = numberFromEnv("CLAUDE_CLI_GATEWAY_PORT", 4568, 1, 65535);
@@ -347,6 +348,7 @@ function translateRequest(body) {
   const requesterSessionKey = extractRequesterSessionKey(systemPrompt);
   return {
     model: body.model,
+    effort: resolveEffort(body.reasoning_effort ?? body.reasoning?.effort),
     promptContent,
     systemPrompt,
     requesterSessionKey,
@@ -355,6 +357,19 @@ function translateRequest(body) {
     stream: body.stream === true,
     includeUsage: body.stream_options?.include_usage === true,
   };
+}
+
+// claude -p accepts --effort low|medium|high|xhigh|max. OpenClaw's thinking
+// level arrives as OpenAI reasoning_effort; none/off mean "no dial" and are
+// silently ignored, anything else unknown is a hard 400.
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
+function resolveEffort(requested) {
+  if (requested === undefined || requested === null || requested === "") return null;
+  const value = String(requested).toLowerCase();
+  if (value === "none" || value === "off") return null;
+  if (EFFORTS.includes(value)) return value;
+  throw requestError(`Unsupported reasoning_effort '${requested}'. Available: ${EFFORTS.join(", ")} (or none/off to omit)`);
 }
 
 function requestError(message) {
@@ -395,6 +410,9 @@ function createClaudeProcess(job) {
     "--strict-mcp-config",
     "--no-session-persistence",
   ];
+  if (job.effort) {
+    args.push("--effort", job.effort);
+  }
   if (job.systemPrompt) {
     args.push("--append-system-prompt-file", "/dev/fd/3");
   }
@@ -429,14 +447,19 @@ function sanitizeError(text) {
 
 function normalizedUsage(usage) {
   if (!usage || typeof usage !== "object") return undefined;
-  const promptTokens = Number(usage.input_tokens || 0)
-    + Number(usage.cache_creation_input_tokens || 0)
-    + Number(usage.cache_read_input_tokens || 0);
-  const completionTokens = Number(usage.output_tokens || 0);
+  const fresh = Number(usage.input_tokens || 0);
+  const cw = Number(usage.cache_creation_input_tokens || 0);
+  const cr = Number(usage.cache_read_input_tokens || 0);
+  const out = Number(usage.output_tokens || 0);
+  // OpenAI-style shape so OpenClaw prices cache reads at the cache rate
+  // instead of full input price: prompt_tokens contains fresh+cache_read,
+  // cached_tokens calls out the cached subset, cache write rides separately.
   return {
-    prompt_tokens: promptTokens,
-    completion_tokens: completionTokens,
-    total_tokens: promptTokens + completionTokens,
+    prompt_tokens: fresh + cr,
+    prompt_tokens_details: { cached_tokens: cr },
+    cache_creation_input_tokens: cw,
+    completion_tokens: out,
+    total_tokens: fresh + cw + cr + out,
   };
 }
 
@@ -582,6 +605,7 @@ async function handleChatCompletion(req, res, body) {
 
   writeLiveLog(requestId, "start", {
     model: job.model,
+    effort: job.effort,
     session: job.requesterSessionKey || null,
     stream: job.stream,
     images: job.imageCount,
