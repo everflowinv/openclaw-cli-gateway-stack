@@ -10,14 +10,31 @@ OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME_DIR/.openclaw}"
 OPENCLAW_LOG_DIR="${OPENCLAW_LOG_DIR:-$OPENCLAW_HOME/logs}"
 OPENCLAW_WORKSPACE="${OPENCLAW_WORKSPACE:-$OPENCLAW_HOME/workspace}"
 LAUNCH_AGENTS="$HOME_DIR/Library/LaunchAgents"
+RENDER_ONLY=0
+if [ "${1:-}" = "--render-only" ] && [ "$#" -eq 2 ]; then
+  RENDER_ONLY=1
+  LAUNCH_AGENTS="$2"
+elif [ "$#" -ne 0 ]; then
+  echo "Usage: bash launchd/install.sh [--render-only OUTPUT_DIR]" >&2
+  exit 2
+fi
 
-NODE_BIN="$(command -v node || true)"
+if [ -z "${NODE_BIN:-}" ]; then
+  if [ -x "$OPENCLAW_HOME/tools/node/bin/node" ]; then
+    NODE_BIN="$OPENCLAW_HOME/tools/node/bin/node"
+  else
+    NODE_BIN="$(command -v node || true)"
+  fi
+fi
 PYTHON3_BIN="$(command -v python3 || true)"
-[ -n "$NODE_BIN" ] || { echo "ERROR: node not found in PATH"; exit 1; }
+[ -x "$NODE_BIN" ] || { echo "ERROR: node executable not found"; exit 1; }
 [ -n "$PYTHON3_BIN" ] || { echo "ERROR: python3 not found in PATH"; exit 1; }
 NODE_BIN_DIR="$(dirname "$NODE_BIN")"
 
-mkdir -p "$OPENCLAW_LOG_DIR" "$LAUNCH_AGENTS"
+mkdir -p "$LAUNCH_AGENTS"
+if [ "$RENDER_ONLY" -eq 0 ]; then
+  mkdir -p "$OPENCLAW_LOG_DIR"
+fi
 
 render() { # render <template> <out.plist> <label>
   local src="$REPO/launchd/$1" dst="$LAUNCH_AGENTS/$2" label="$3"
@@ -33,17 +50,21 @@ render() { # render <template> <out.plist> <label>
   echo "rendered $dst"
 }
 
-install_service() { # install_service <plist-name> <label>
-  local plist="$1" label="$2"
-  render "$plist.template" "$plist" "$label"
+install_service() { # install_service <component>
+  local component="$1" label="$LABEL_PREFIX.$1"
+  local plist="$label.plist"
+  render "$component.plist.template" "$plist" "$label"
+  if [ "$RENDER_ONLY" -eq 1 ]; then return; fi
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENTS/$plist"
   echo "started $label"
 }
 
-install_service "ai.openclaw.claude-cli-gateway.plist"      "$LABEL_PREFIX.claude-cli-gateway"
-install_service "ai.openclaw.antigravity-cli-gateway.plist" "$LABEL_PREFIX.antigravity-cli-gateway"
-install_service "ai.openclaw.log-viewer.plist"              "$LABEL_PREFIX.log-viewer"
+install_service "claude-cli-gateway"
+install_service "antigravity-cli-gateway"
+install_service "log-viewer"
+
+if [ "$RENDER_ONLY" -eq 1 ]; then exit 0; fi
 
 echo
 echo "health checks:"

@@ -106,6 +106,18 @@ models in openclaw.json.
 - `AGY_CLI_GATEWAY_EXEC_MAX_TIMEOUT_MS` (default `600000`, openclaw exec cap)
 - `AGY_CLI_GATEWAY_HEARTBEAT_SECONDS` (default `120`; `0` disables idle timer)
 - `AGY_CLI_GATEWAY_MAX_BODY_MB` (default `64`)
+- `AGY_CLI_GATEWAY_MAX_PROMPT_BYTES` (default `190000`). Measures the complete
+  assembled prompt with `Buffer.byteLength(prompt, "utf8")` and rejects oversized
+  input with HTTP 413 before spawning agy. This includes system text, conversation
+  history, and gateway framing. `/health` reports `maxPromptBytes`.
+- `AGY_CLI_GATEWAY_MAX_PROMPT_CHARS` is a deprecated fallback alias. Its value
+  is now interpreted as **bytes**, not JavaScript characters; the new byte setting
+  takes precedence. Character counting was unsafe for Chinese and emoji input.
+  Six live probes of agy **1.2.0** confirmed model-facing truncation near 192,000
+  UTF-8 bytes while stream-json still reports SUCCESS/exit 0 with no truncation
+  warning. Splitting into multiple text blocks does not help. See the
+  [verification report](../docs/agy-long-context-2026-09-10.md) before changing
+  the limit. The default leaves headroom for CLI-added message framing.
 - `AGY_CLI_GATEWAY_API_KEY` (optional local bearer token)
 - `AGY_CLI_BIN` (default `$HOME/.local/bin/agy`)
 - `AGY_CLI_GATEWAY_CWD` (default `<this dir>/cwd`)

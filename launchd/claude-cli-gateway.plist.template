@@ -15,7 +15,7 @@
 		<key>HOME</key>
 		<string>__HOME__</string>
 		<key>PATH</key>
-		<string>__NODE_BIN_DIR__:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<string>__NODE_BIN_DIR__:__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
 	</dict>
 	<key>KeepAlive</key>
 	<true/>

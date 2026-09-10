@@ -69,6 +69,12 @@ troubleshooting.
   `claude-cli-gateway/mcp.json.example` for the expected shape. Register the
   same server for agy with: `agy mcp add openclaw <command> -- <args…>`
 
+The 2026-09-10 source snapshot was validated with Node.js **26.8.2**, Claude
+Code **2.1.263**, and Antigravity CLI **1.2.0**. These are the installed versions
+used for validation, not a claim about the vendors' latest releases. CLI
+binaries, account credentials, local MCP configuration, and runtime logs are
+not included. See [CHANGELOG.md](CHANGELOG.md) for this snapshot's changes.
+
 ## Install
 
 ```bash
@@ -86,6 +92,19 @@ agy mcp add openclaw node -- /path/to/your/openclaw-mcp-bridge.js
 bash launchd/install.sh
 
 # 4. register providers in OpenClaw (~/.openclaw/openclaw.json)
+```
+
+The installer prefers `~/.openclaw/tools/node/bin/node` when present, otherwise
+the `node` on PATH. Override it with an absolute path using
+`NODE_BIN=/absolute/path/to/node bash launchd/install.sh`. Both gateways receive
+that runtime's directory in PATH, and the Claude service also includes
+`~/.local/bin` for native Claude CLI installs. Use an absolute Node path in
+your MCP configuration too, to avoid inheriting an older desktop-app PATH.
+
+Preview generated LaunchAgents without installing or restarting services:
+
+```bash
+bash launchd/install.sh --render-only /tmp/cli-gateway-launchd-preview
 ```
 
 Minimal OpenClaw provider registration:
@@ -126,6 +145,16 @@ Then add e.g. `"antigravity-cli-gateway/gemini-3.8-flash": {}` to
 
 ```bash
 openclaw agent --model antigravity-cli-gateway/gemini-3.8-flash --message 'ping'
+```
+
+## Validation
+
+These tests use synthetic CLI output and do not make model requests:
+
+```bash
+node claude-cli-gateway/server.integration.test.mjs
+node antigravity-cli-gateway/server.integration.test.mjs
+node parsers/self-test.mjs
 ```
 
 ## Security notes

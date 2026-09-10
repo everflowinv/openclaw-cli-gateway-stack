@@ -11,9 +11,9 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-// OpenClaw workspace location; unused for spawning (agy runs in AGY_CWD)
-// but kept for tooling that expects it.
+// OpenClaw workspace location; agy itself runs in the isolated AGY_CWD.
 const WORKSPACE = process.env.AGY_CLI_GATEWAY_WORKSPACE
+  || process.env.OPENCLAW_WORKSPACE
   || path.join(os.homedir(), ".openclaw", "workspace");
 // agy keeps its own built-in file/shell/browser tools alive even when the
 // request only needs OpenClaw MCP tools, so it runs in a dedicated empty cwd
@@ -35,6 +35,18 @@ const EXEC_MAX_TIMEOUT_MS = numberFromEnv(
 );
 const MAX_BODY_BYTES = numberFromEnv("AGY_CLI_GATEWAY_MAX_BODY_MB", 64, 1, 256) * 1024 * 1024;
 const API_KEY = process.env.AGY_CLI_GATEWAY_API_KEY || "";
+// agy 1.2.0 still truncates the model-facing user message near 192000 UTF-8
+// bytes, then returns SUCCESS/exit 0 without a stream-json or stderr warning.
+// Its stored generation request contains the internal truncation notice.
+// Multiple text blocks do not avoid it. Keep headroom for CLI-added framing;
+// counting JS characters would allow Chinese/emoji prompts to exceed the cap.
+// MAX_PROMPT_CHARS is a deprecated fallback alias, now interpreted as bytes.
+const MAX_PROMPT_BYTES = numberFromEnv(
+  "AGY_CLI_GATEWAY_MAX_PROMPT_BYTES",
+  numberFromEnv("AGY_CLI_GATEWAY_MAX_PROMPT_CHARS", 190000, 10000, 10000000),
+  10000,
+  10000000,
+);
 // agy 1.1.26 can silently lose the model stream mid-response (proxy kills
 // the long-lived connection; agy never notices and keeps running background
 // polls forever). If agy produces no stdout at all for this long, kill it and
@@ -287,6 +299,21 @@ function translateRequest(body) {
   if (latest.role !== "user") prompt += `${latest.role}: `;
   prompt += latest.text || "Continue the conversation.";
 
+  const promptBytes = Buffer.byteLength(prompt, "utf8");
+  if (promptBytes > MAX_PROMPT_BYTES) {
+    // Wording matters: OpenClaw classifies context overflow from the error text
+    // (isLikelyContextOverflowError), not the status code. It needs a "signal"
+    // word (prompt/input/context/token) AND an "action" word (exceeds/maximum/
+    // limit/too large). Verified against the shipped classifier -- drop those
+    // and this degrades to an unclassified provider error instead of failover.
+    throw requestError(
+      `Prompt exceeds the Antigravity CLI maximum input size: ${promptBytes} UTF-8 bytes ` +
+        `is over the ${MAX_PROMPT_BYTES} byte maximum. agy would silently truncate ` +
+        `the input and answer from a partial transcript.`,
+      413,
+    );
+  }
+
   const modelMeta = MODELS.get(resolvedModel.base);
   return {
     model: modelMeta?.agyModel || resolvedModel.base,
@@ -300,9 +327,9 @@ function translateRequest(body) {
   };
 }
 
-function requestError(message) {
+function requestError(message, statusCode = 400) {
   const error = new Error(message);
-  error.statusCode = 400;
+  error.statusCode = statusCode;
   return error;
 }
 
@@ -818,6 +845,7 @@ const server = http.createServer(async (req, res) => {
         maxConcurrent: MAX_CONCURRENT,
         queueTimeoutSeconds: Math.round(QUEUE_TIMEOUT_MS / 1000),
         execMaxTimeoutMs: EXEC_MAX_TIMEOUT_MS,
+        maxPromptBytes: MAX_PROMPT_BYTES,
         multimodal: { input: ["text"] },
       });
     }

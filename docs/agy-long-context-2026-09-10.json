@@ -1,0 +1,197 @@
+{
+  "date": "2026-09-10",
+  "agy_version": "1.2.0",
+  "agy_sha256": "f3671863b53ecef2c45a41673677fe603fbe5d73df33d744feec3e88d5af0199",
+  "model": "gemini-3.8-flash",
+  "effort": "low",
+  "transport": "stream-json input/output",
+  "truncation_warning_on_stderr": false,
+  "cases": [
+    {
+      "case": "ascii-180000-1blocks-1789045403",
+      "characters": 180000,
+      "utf8_bytes": 180000,
+      "blocks": 1,
+      "exit_code": 0,
+      "status": "SUCCESS",
+      "matched": {
+        "CHECKPOINT_0": true,
+        "CHECKPOINT_1": true,
+        "CHECKPOINT_2": true,
+        "CHECKPOINT_3": true,
+        "CHECKPOINT_4": true,
+        "CHECKPOINT_5": true
+      },
+      "matching_input_prefix_bytes": 180000,
+      "stored_generation_evidence": [
+        {
+          "matching_input_prefix_bytes": 180000,
+          "truncation_notice": null,
+          "checkpoint_value_records": {
+            "CHECKPOINT_0": true,
+            "CHECKPOINT_1": true,
+            "CHECKPOINT_2": true,
+            "CHECKPOINT_3": true,
+            "CHECKPOINT_4": true,
+            "CHECKPOINT_5": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "ascii-190000-1blocks-1789045516",
+      "characters": 190000,
+      "utf8_bytes": 190000,
+      "blocks": 1,
+      "exit_code": 0,
+      "status": "SUCCESS",
+      "matched": {
+        "CHECKPOINT_0": true,
+        "CHECKPOINT_1": true,
+        "CHECKPOINT_2": true,
+        "CHECKPOINT_3": true,
+        "CHECKPOINT_4": true,
+        "CHECKPOINT_5": true
+      },
+      "matching_input_prefix_bytes": 190000,
+      "stored_generation_evidence": [
+        {
+          "matching_input_prefix_bytes": 190000,
+          "truncation_notice": null,
+          "checkpoint_value_records": {
+            "CHECKPOINT_0": true,
+            "CHECKPOINT_1": true,
+            "CHECKPOINT_2": true,
+            "CHECKPOINT_3": true,
+            "CHECKPOINT_4": true,
+            "CHECKPOINT_5": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "ascii-250000-1blocks-1789045412",
+      "characters": 250000,
+      "utf8_bytes": 250000,
+      "blocks": 1,
+      "exit_code": 0,
+      "status": "SUCCESS",
+      "matched": {
+        "CHECKPOINT_0": true,
+        "CHECKPOINT_1": true,
+        "CHECKPOINT_2": true,
+        "CHECKPOINT_3": true,
+        "CHECKPOINT_4": false,
+        "CHECKPOINT_5": false
+      },
+      "matching_input_prefix_bytes": 191985,
+      "stored_generation_evidence": [
+        {
+          "matching_input_prefix_bytes": 191985,
+          "truncation_notice": "<truncated 58420 bytes>",
+          "checkpoint_value_records": {
+            "CHECKPOINT_0": true,
+            "CHECKPOINT_1": true,
+            "CHECKPOINT_2": true,
+            "CHECKPOINT_3": true,
+            "CHECKPOINT_4": false,
+            "CHECKPOINT_5": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "ascii-250000-4blocks-1789045437",
+      "characters": 250000,
+      "utf8_bytes": 250000,
+      "blocks": 4,
+      "exit_code": 0,
+      "status": "SUCCESS",
+      "matched": {
+        "CHECKPOINT_0": true,
+        "CHECKPOINT_1": true,
+        "CHECKPOINT_2": true,
+        "CHECKPOINT_3": true,
+        "CHECKPOINT_4": false,
+        "CHECKPOINT_5": false
+      },
+      "matching_input_prefix_bytes": 191985,
+      "stored_generation_evidence": [
+        {
+          "matching_input_prefix_bytes": 191985,
+          "truncation_notice": "<truncated 58420 bytes>",
+          "checkpoint_value_records": {
+            "CHECKPOINT_0": true,
+            "CHECKPOINT_1": true,
+            "CHECKPOINT_2": true,
+            "CHECKPOINT_3": true,
+            "CHECKPOINT_4": false,
+            "CHECKPOINT_5": false
+          }
+        }
+      ]
+    },
+    {
+      "case": "cjk-60000-1blocks-1789045516",
+      "characters": 60000,
+      "utf8_bytes": 174990,
+      "blocks": 1,
+      "exit_code": 0,
+      "status": "SUCCESS",
+      "matched": {
+        "CHECKPOINT_0": true,
+        "CHECKPOINT_1": true,
+        "CHECKPOINT_2": true,
+        "CHECKPOINT_3": true,
+        "CHECKPOINT_4": true,
+        "CHECKPOINT_5": true
+      },
+      "matching_input_prefix_bytes": 174990,
+      "stored_generation_evidence": [
+        {
+          "matching_input_prefix_bytes": 174990,
+          "truncation_notice": null,
+          "checkpoint_value_records": {
+            "CHECKPOINT_0": true,
+            "CHECKPOINT_1": true,
+            "CHECKPOINT_2": true,
+            "CHECKPOINT_3": true,
+            "CHECKPOINT_4": true,
+            "CHECKPOINT_5": true
+          }
+        }
+      ]
+    },
+    {
+      "case": "cjk-90000-1blocks-1789045437",
+      "characters": 90000,
+      "utf8_bytes": 263224,
+      "blocks": 1,
+      "exit_code": 0,
+      "status": "SUCCESS",
+      "matched": {
+        "CHECKPOINT_0": true,
+        "CHECKPOINT_1": true,
+        "CHECKPOINT_2": true,
+        "CHECKPOINT_3": false,
+        "CHECKPOINT_4": false,
+        "CHECKPOINT_5": false
+      },
+      "matching_input_prefix_bytes": 191984,
+      "stored_generation_evidence": [
+        {
+          "matching_input_prefix_bytes": 191984,
+          "truncation_notice": "<truncated 71645 bytes>",
+          "checkpoint_value_records": {
+            "CHECKPOINT_0": true,
+            "CHECKPOINT_1": true,
+            "CHECKPOINT_2": true,
+            "CHECKPOINT_3": false,
+            "CHECKPOINT_4": false,
+            "CHECKPOINT_5": false
+          }
+        }
+      ]
+    }
+  ]
+}
