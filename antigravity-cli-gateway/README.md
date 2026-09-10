@@ -86,6 +86,10 @@ models in openclaw.json.
 - `AGY_CLI_GATEWAY_MAX_CONCURRENT` (default `4`; LaunchAgent sets `6`)
 - `AGY_CLI_GATEWAY_QUEUE_TIMEOUT_SECONDS` (default `120`; LaunchAgent sets `600`)
 - `AGY_CLI_GATEWAY_TIMEOUT_SECONDS` (default `3600`; LaunchAgent sets `3900`)
+- agy **1.1.28+** fixed the upstream exit hangs / silent headless failures
+  this gateway was defending against (verified on 1.2.0: prompt exit, same
+  event schema, MCP registration intact). The defenses below are kept as
+  insurance against future regressions — they are inert when the CLI behaves.
 - `AGY_CLI_GATEWAY_STALL_SECONDS` (default `600`). Stream-stall watchdog:
   agy 1.1.26 can silently lose the model connection mid-response (long-lived
   SSE through a local proxy gets dropped; agy keeps running background polls
