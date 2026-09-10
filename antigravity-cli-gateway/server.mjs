@@ -9,6 +9,7 @@ import os from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { normalizedAgyUsage as normalizedUsage, rawAgyUsage as rawUsage, truncateText } from "../lib/cli-output.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // OpenClaw workspace location; agy itself runs in the isolated AGY_CWD.
@@ -384,41 +385,10 @@ function sanitizeError(text) {
     .slice(-6000);
 }
 
-function normalizedUsage(usage) {
-  if (!usage || typeof usage !== "object") return undefined;
-  const promptTokens = Number(usage.input_tokens || 0) + Number(usage.cache_read_tokens || 0);
-  const completionTokens = Number(usage.output_tokens || 0) + Number(usage.thinking_tokens || 0);
-  return {
-    prompt_tokens: promptTokens,
-    prompt_tokens_details: { cached_tokens: Number(usage.cache_read_tokens || 0) },
-    completion_tokens: completionTokens,
-    total_tokens: promptTokens + completionTokens,
-  };
-}
-
-// agy reports the true cache split: input_tokens EXCLUDES cache_read_tokens
-// (total = input + cache_read + output + thinking; thinking billed as output).
-// Kept alongside the normalized OpenAI-style usage (prompt = input + cache_read)
-// so downstream stats can price exactly.
-function rawUsage(usage) {
-  if (!usage || typeof usage !== "object") return undefined;
-  return {
-    input_tokens: Number(usage.input_tokens || 0),
-    cache_read_tokens: Number(usage.cache_read_tokens || 0),
-    output_tokens: Number(usage.output_tokens || 0),
-    thinking_tokens: Number(usage.thinking_tokens || 0),
-  };
-}
-
 // agy tool steps carry tool_info {name, parameters, output}; MCP calls arrive
 // as a generic call_mcp_tool whose parameters name the real server.tool and
 // its Arguments — unwrap those so the log shows "openclaw.exec(command=...)"
 // instead of an opaque "call_mcp_tool".
-function truncateText(value, max) {
-  const text = String(value ?? "");
-  return text.length > max ? `${text.slice(0, max)}…` : text;
-}
-
 function describeToolStep(step) {
   const info = step.tool_info && typeof step.tool_info === "object" ? step.tool_info : {};
   const parameters = info.parameters && typeof info.parameters === "object" ? info.parameters : null;
@@ -432,7 +402,7 @@ function describeToolStep(step) {
   }
   const argsText = args === null || args === undefined
     ? null
-    : truncateText(typeof args === "string" ? args : JSON.stringify(args), 400);
+    : truncateText(args, 400);
   return {
     name,
     via,

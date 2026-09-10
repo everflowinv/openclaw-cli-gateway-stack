@@ -5,6 +5,7 @@ import os from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { normalizedClaudeUsage as normalizedUsage } from "../lib/cli-output.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE = process.env.CLAUDE_CLI_GATEWAY_WORKSPACE
@@ -443,24 +444,6 @@ function sanitizeError(text) {
     .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s]+/gi, "$1[REDACTED]")
     .replace(/(api[_-]?key\s*[:=]\s*)[^\s]+/gi, "$1[REDACTED]")
     .slice(-6000);
-}
-
-function normalizedUsage(usage) {
-  if (!usage || typeof usage !== "object") return undefined;
-  const fresh = Number(usage.input_tokens || 0);
-  const cw = Number(usage.cache_creation_input_tokens || 0);
-  const cr = Number(usage.cache_read_input_tokens || 0);
-  const out = Number(usage.output_tokens || 0);
-  // OpenAI-style shape so OpenClaw prices cache reads at the cache rate
-  // instead of full input price: prompt_tokens contains fresh+cache_read,
-  // cached_tokens calls out the cached subset, cache write rides separately.
-  return {
-    prompt_tokens: fresh + cr,
-    prompt_tokens_details: { cached_tokens: cr },
-    cache_creation_input_tokens: cw,
-    completion_tokens: out,
-    total_tokens: fresh + cw + cr + out,
-  };
 }
 
 function runClaude(job, callbacks) {

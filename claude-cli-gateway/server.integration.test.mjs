@@ -79,7 +79,7 @@ process.stdin.on("end", () => {
       subtype: "success",
       is_error: false,
       result: "ok",
-      usage: { input_tokens: 1, output_tokens: 1 },
+      usage: { input_tokens: "abc", cache_read_input_tokens: "900", cache_creation_input_tokens: -5, output_tokens: 20.7 },
     }) + "\\n");
   }, 1800);
 });
@@ -126,6 +126,7 @@ process.stdin.on("end", () => {
     const completed = await first;
     assert.equal(completed.status, 200, JSON.stringify(completed.body));
     assert.equal(completed.body.choices[0].message.content, "ok");
+    assert.deepEqual(completed.body.usage, {prompt_tokens:900, prompt_tokens_details:{cached_tokens:900}, cache_creation_input_tokens:0, completion_tokens:20, total_tokens:920});
     assert.match(stdout, /"event":"queued"/);
     assert.match(stdout, /"event":"queue_timeout"/);
     process.stdout.write("claude-cli gateway integration: queue timeout ok\n");

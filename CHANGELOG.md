@@ -2,6 +2,12 @@
 
 ## 2026.09.10
 
+- Preserve object-shaped Antigravity tool diagnostics, with bounded fallback
+  formatting for Error, circular objects, BigInt and custom toJSON failures.
+- Normalize malformed CLI token counters in both gateways and raw agy usage,
+  preserving existing cache accounting and explicit zero fields. Add helper
+  tests and real HTTP/fake-CLI regression coverage.
+
 - Sync the Antigravity gateway's local prompt-length guard: inputs longer than
   190,000 UTF-8 bytes return HTTP 413 before starting the CLI, with error wording
   that OpenClaw can recognize as context overflow. The byte limit fixes the old character-based guard for Chinese and emoji.

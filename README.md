@@ -50,10 +50,12 @@ the official CLIs behind a tiny local gateway means:
 | `live-log-viewer/` | Python SSE server + one HTML page with a tab per gateway: per-request blocks, thinking/text, tool calls with arguments/outputs, regex + session filters, follow mode, download | 8765 |
 | `parsers/` | Standalone, dependency-free modules that parse each CLI's headless stream-json output (plus fixtures + self-test) — reusable without the gateways, with protocol notes | — |
 | `skills/model-usage-cost/` | OpenClaw skill: per-model token usage and list-price cost across 1D/7D/30D windows, merging codex rollouts, both gateway logs, OpenClaw trajectories and local Claude Code sessions | — |
+| `lib/` | Shared CLI output normalization and diagnostic formatting; required by both gateways | — |
 | `launchd/` | macOS LaunchAgent templates + `install.sh` | — |
 
 Each gateway has its own README with configuration, env vars, and
-troubleshooting.
+troubleshooting. When copying a gateway into another scripts directory, also
+copy the sibling `lib/` directory; keep its relative location unchanged.
 
 ## Prerequisites
 
@@ -152,6 +154,7 @@ openclaw agent --model antigravity-cli-gateway/gemini-3.8-flash --message 'ping'
 These tests use synthetic CLI output and do not make model requests:
 
 ```bash
+node --test lib/cli-output.test.mjs
 node claude-cli-gateway/server.integration.test.mjs
 node antigravity-cli-gateway/server.integration.test.mjs
 node parsers/self-test.mjs
