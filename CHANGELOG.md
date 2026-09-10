@@ -2,6 +2,16 @@
 
 ## 2026.09.10
 
+- Repair usage accounting: deduplicate Codex status counters and Claude message
+  chunks; include native OpenAI, Claude subagents, SQLite import archives, agy
+  conversation DBs and Dalton invocations. Add an idempotent evidence ledger,
+  broker collector, explicit coverage gaps, provider-qualified cost estimates,
+  full totals with `--top`, and 32 accounting regressions.
+- Fix agy thinking double counting in both gateway and parser: output_tokens
+  already includes thinking. Log agy conversation IDs and Claude per-message
+  usage for request reconciliation and failed-run recovery. See the accounting
+  audit in `docs/usage-accounting-repair-2026-09-10.md`.
+
 - Preserve object-shaped Antigravity tool diagnostics, with bounded fallback
   formatting for Error, circular objects, BigInt and custom toJSON failures.
 - Normalize malformed CLI token counters in both gateways and raw agy usage,

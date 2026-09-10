@@ -27,10 +27,11 @@
 //   • result may be status ERROR ("The stream was interrupted...") while still
 //     carrying the complete response — check hasFullText before discarding.
 //   • usage: input_tokens EXCLUDES cache_read_tokens;
-//     total = input + cache_read + output + thinking; thinking_tokens are
-//     output-side (billed like output).
+//     output_tokens ALREADY includes thinking_tokens (verified agy 1.2.0
+//     ModelUsageStats: output = thinking + response). Do not add it twice.
 
 import readline from "node:readline";
+import { rawAgyUsage } from "../lib/cli-output.mjs";
 
 export function makeAgyStreamParser({ onEvent }) {
   let buffer = "";
@@ -123,16 +124,17 @@ export function describeToolStep(step) {
 
 export function normalizeUsage(usage) {
   if (!usage || typeof usage !== "object") return undefined;
-  const input = Number(usage.input_tokens || 0);
-  const cr = Number(usage.cache_read_tokens || 0);
-  const output = Number(usage.output_tokens || 0);
-  const thinking = Number(usage.thinking_tokens || 0);
+  const raw = rawAgyUsage(usage);
+  const input = raw.input_tokens;
+  const cr = raw.cache_read_tokens;
+  const output = raw.output_tokens;
+  const thinking = raw.thinking_tokens;
   return {
     fresh: input,             // input EXCLUDES cache_read
     cache_read: cr,
     output, thinking,
     prompt_total: input + cr,
-    output_total: output + thinking,
+    output_total: output,
   };
 }
 

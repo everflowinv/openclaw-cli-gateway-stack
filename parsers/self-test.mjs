@@ -49,7 +49,7 @@ check("agy: MCP unwrap to server.tool", aMcp?.via === "call_mcp_tool" && aMcp?.o
   && aMcp?.args?.includes("echo done") && aMcp?.durationMs === 46, JSON.stringify(aMcp));
 const aRes = a.find((e) => e.type === "result");
 check("agy: result success", aRes?.status === "SUCCESS" && aRes?.hasFullText === true);
-check("agy: usage semantics (input excludes cache_read; thinking output-side)",
+check("agy: usage semantics (input excludes cache_read; thinking included in output, never added twice)",
   aRes?.usage?.fresh === 6275 && aRes?.usage?.cache_read === 8126
   && aRes?.usage?.prompt_total === 14401 && aRes?.usage?.output_total === 38,
   JSON.stringify(aRes?.usage));

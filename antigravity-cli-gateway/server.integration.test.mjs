@@ -76,6 +76,7 @@ if (process.argv.includes("--version")) {
 fs.appendFileSync(process.env.TEST_AGY_CALLS, JSON.stringify(process.argv.slice(2)) + "\\n");
 process.stdin.resume();
 process.stdin.on("end", () => {
+  console.log(JSON.stringify({event:"init",conversation_id:"agy-test-conversation",init:{model:"gemini-3.8-flash"}}));
   console.log(JSON.stringify({event:"step_update",step_update:{step_type:"tool",state:"ERROR",tool_info:{name:"shell",error:{error:"ENOENT",code:2}}}}));
   console.log(JSON.stringify({event:"result", result:{status:"SUCCESS", response:"ok", usage:{input_tokens:"abc",cache_read_tokens:"900",output_tokens:20.7,thinking_tokens:-5}}}));
 });
@@ -126,9 +127,13 @@ process.stdin.on("end", () => {
     assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
     assert.equal(accepted.body.choices[0].message.content, "ok");
     assert.deepEqual(accepted.body.usage, {prompt_tokens:900,prompt_tokens_details:{cached_tokens:900},completion_tokens:20,total_tokens:920});
+    const logDeadline=Date.now()+2000;
+    while (!stdout.includes('"event":"done"') && Date.now()<logDeadline) await new Promise(resolve=>setTimeout(resolve,10));
     const logs = stdout.split("\n").filter(line => line.includes('"event":')).map(line => JSON.parse(line.slice(line.indexOf("{"))));
     const error = logs.find(row => row.event === "tool_error");
     assert.ok(error, "tool error must be logged");
+    assert.equal(logs.find(row=>row.event==="init").conversationId,"agy-test-conversation");
+    assert.equal(logs.find(row=>row.event==="done").usageSchema,"agy-output-includes-thinking-v1");
     assert.deepEqual(JSON.parse(error.error), {error:"ENOENT",code:2});
     assert.equal(fs.readFileSync(calls, "utf8").trim().split("\n").length, 1);
     console.log("antigravity gateway integration: UTF-8 limit, Chinese/emoji, streaming rejection, full history and normal request ok");

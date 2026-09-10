@@ -491,7 +491,7 @@ function runAgy(job, callbacks) {
         }
         const kind = event?.event;
         if (kind === "init") {
-          callbacks.onInit?.(event.init || {});
+          callbacks.onInit?.({ ...(event.init || {}), conversationId: event.conversation_id || event.init?.conversation_id || null });
         } else if (kind === "step_update") {
           const step = event.step_update || {};
           if (step.step_type === "agent_response" && typeof step.text_delta === "string") {
@@ -616,6 +616,7 @@ async function handleChatCompletion(req, res, body) {
   let cancelLogged = false;
 
   writeLiveLog(requestId, "start", {
+    requestUuid,
     model: job.model,
     effort: job.effort,
     requestedEffort: job.requestedEffort,
@@ -630,6 +631,7 @@ async function handleChatCompletion(req, res, body) {
     onChild: (value) => { child = value; },
     onInit: (init) => {
       writeLiveLog(requestId, "init", {
+        conversationId: init.conversationId || null,
         model: init.model || job.model,
         permissionMode: init.permission_mode || null,
         toolCount: Array.isArray(init.tools) ? init.tools.length : null,
@@ -663,6 +665,9 @@ async function handleChatCompletion(req, res, body) {
 
   const logDone = (result, extra = {}) => {
     writeLiveLog(requestId, "done", {
+      requestUuid,
+      usageSchema: "agy-output-includes-thinking-v1",
+      conversationId: result?.conversation_id || null,
       durationMs: Date.now() - startedAt,
       usage: normalizedUsage(result?.usage),
       ...(result?.usage ? { usage_raw: rawUsage(result.usage) } : {}),

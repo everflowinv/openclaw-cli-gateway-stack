@@ -74,6 +74,7 @@ if (process.argv.includes("--version")) {
 process.stdin.resume();
 process.stdin.on("end", () => {
   setTimeout(() => {
+    console.log(JSON.stringify({type:"assistant",message:{id:"msg-usage-fixture",model:"claude-opus-5",usage:{input_tokens:10,cache_read_input_tokens:900,output_tokens:20}}}));
     process.stdout.write(JSON.stringify({
       type: "result",
       subtype: "success",
@@ -127,6 +128,9 @@ process.stdin.on("end", () => {
     assert.equal(completed.status, 200, JSON.stringify(completed.body));
     assert.equal(completed.body.choices[0].message.content, "ok");
     assert.deepEqual(completed.body.usage, {prompt_tokens:900, prompt_tokens_details:{cached_tokens:900}, cache_creation_input_tokens:0, completion_tokens:20, total_tokens:920});
+    assert.match(stdout, /"event":"usage"/);
+    assert.match(stdout, /"messageId":"msg-usage-fixture"/);
+    assert.match(stdout, /"requestUuid":"[a-f0-9-]{36}"/);
     assert.match(stdout, /"event":"queued"/);
     assert.match(stdout, /"event":"queue_timeout"/);
     process.stdout.write("claude-cli gateway integration: queue timeout ok\n");

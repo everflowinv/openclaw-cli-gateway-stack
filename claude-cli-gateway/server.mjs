@@ -499,6 +499,8 @@ function runClaude(job, callbacks) {
           } else if (inner?.type === "content_block_stop") {
             callbacks.onBlockStop?.();
           }
+        } else if (event.type === "assistant" && event.message?.id && event.message?.usage) {
+          callbacks.onUsage?.(event.message);
         } else if (event.type === "result") {
           resultEvent = event;
           callbacks.onResult?.(event);
@@ -587,6 +589,7 @@ async function handleChatCompletion(req, res, body) {
   let cancelLogged = false;
 
   writeLiveLog(requestId, "start", {
+    requestUuid,
     model: job.model,
     effort: job.effort,
     session: job.requesterSessionKey || null,
@@ -613,10 +616,15 @@ async function handleChatCompletion(req, res, body) {
       }
     },
     onBlockStop: () => writeLiveLog(requestId, "block_stop"),
+    onUsage: (message) => writeLiveLog(requestId, "usage", {
+      requestUuid, messageId: message.id, model: message.model || job.model,
+      usage: normalizedUsage(message.usage),
+    }),
   };
 
   const logDone = (result, extra = {}) => {
     writeLiveLog(requestId, "done", {
+      requestUuid,
       durationMs: Date.now() - startedAt,
       usage: normalizedUsage(result?.usage),
       ...extra,
@@ -627,6 +635,7 @@ async function handleChatCompletion(req, res, body) {
     writeLiveLog(requestId, "error", {
       durationMs: Date.now() - startedAt,
       code: error?.code || "claude_cli_error",
+      ...(error?.resultEvent?.usage ? { usage: normalizedUsage(error.resultEvent.usage) } : {}),
       message: sanitizeError(error?.message || String(error)),
     });
   };

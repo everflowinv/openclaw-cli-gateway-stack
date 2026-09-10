@@ -68,8 +68,9 @@ the CLIs uniformly:
   `{ServerName, ToolName, Arguments}`; the parser unwraps them to
   `"server.tool"` so logs read `openclaw.exec(command=...)`.
 - `usage`: `input_tokens` **excludes** `cache_read_tokens`;
-  `total = input + cache_read + output + thinking`; `thinking_tokens` are
-  output-side.
+  `output_tokens` already includes `thinking_tokens` (agy 1.2.0 ModelUsageStats).
+  Use `input + cache_read + output` for disjoint local token totals; do not add thinking again.
+  The raw CLI `total_tokens` can omit cache reads, so it is not used as the accounting sum.
 - `result` can be `status:"ERROR"` ("The stream was interrupted...") while
   still carrying the **complete** response text — check
   `hasFullText` before treating it as a failure. This happens when a proxy
