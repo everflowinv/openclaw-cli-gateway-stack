@@ -55,8 +55,16 @@ the official CLIs behind a tiny local gateway means:
 | `launchd/` | macOS LaunchAgent templates + `install.sh` | — |
 
 Each gateway has its own README with configuration, env vars, and
-troubleshooting. When copying a gateway into another scripts directory, also
-copy the sibling `lib/` directory; keep its relative location unchanged.
+troubleshooting. Since 2026-09-11 this repo **is the runtime location**: the
+launchd services (`ai.openclaw.claude-cli-gateway`,
+`ai.openclaw.antigravity-cli-gateway`, `ai.openclaw.antigravity-websearch`,
+`com.openclaw.log-viewer`) run straight from this checkout and OpenClaw loads
+the web-search plugin from `antigravity-cli-gateway/openclaw-plugin/`, so there
+is no deployed duplicate to keep in sync. Keep `main` clean — develop in
+worktrees and restart the service after merging. `claude-cli-gateway/mcp.json`
+stays gitignored and machine-local. The pre-migration `~/.openclaw/workspace/
+scripts/` copies are archived in
+`.gateway-stack-premigration-backup-20260911/`.
 
 ## Prerequisites
 
