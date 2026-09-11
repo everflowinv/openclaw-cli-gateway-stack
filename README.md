@@ -62,9 +62,8 @@ launchd services (`ai.openclaw.claude-cli-gateway`,
 the web-search plugin from `antigravity-cli-gateway/openclaw-plugin/`, so there
 is no deployed duplicate to keep in sync. Keep `main` clean — develop in
 worktrees and restart the service after merging. `claude-cli-gateway/mcp.json`
-stays gitignored and machine-local. The pre-migration `~/.openclaw/workspace/
-scripts/` copies are archived in
-`.gateway-stack-premigration-backup-20260911/`.
+stays gitignored and machine-local. The pre-migration
+`~/.openclaw/workspace/scripts/` copies were deleted after verification.
 
 ## Prerequisites
 
