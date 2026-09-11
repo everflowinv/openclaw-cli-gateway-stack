@@ -3,6 +3,7 @@ venv/
 __pycache__/
 *.log
 antigravity-cli-gateway/cwd/*
+antigravity-cli-gateway/websearch-cwd/
 !antigravity-cli-gateway/cwd/.gitkeep
 claude-cli-gateway/mcp.json
 .DS_Store

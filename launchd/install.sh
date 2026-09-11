@@ -62,6 +62,7 @@ install_service() { # install_service <component>
 
 install_service "claude-cli-gateway"
 install_service "antigravity-cli-gateway"
+install_service "antigravity-websearch"
 install_service "log-viewer"
 
 if [ "$RENDER_ONLY" -eq 1 ]; then exit 0; fi
@@ -71,4 +72,5 @@ echo "health checks:"
 sleep 2
 curl -s --max-time 10 http://127.0.0.1:4568/health && echo
 curl -s --max-time 10 http://127.0.0.1:4569/health && echo
+curl -s --max-time 10 http://127.0.0.1:4570/health && echo
 echo "log viewer: http://127.0.0.1:8765"

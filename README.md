@@ -47,6 +47,7 @@ the official CLIs behind a tiny local gateway means:
 |---|---|---|
 | `claude-cli-gateway/` | OpenAI-compatible façade over `claude -p --stream-json`; concurrency/queue/timeout limits; watchdog heartbeats for OpenClaw's stuck-session detector | 4568 |
 | `antigravity-cli-gateway/` | Same idea over `agy` headless print mode; reasoning-effort passthrough (`reasoning_effort` → `--effort`), stall watchdog, degraded-success salvage (an interrupted stream that still carries the full text is returned, not discarded) | 4569 |
+| `antigravity-cli-gateway/websearch-service.mjs` + `openclaw-plugin/` | Gemini-provider-shaped web_search over agy's subscription-grounded `search_web` (minimal `excludeDefaultComponents` agent, ~5k input tokens/search); registered in OpenClaw as the `antigravity` web-search provider | 4570 |
 | `live-log-viewer/` | Python SSE server + one HTML page with a tab per gateway: per-request blocks, thinking/text, tool calls with arguments/outputs, regex + session filters, follow mode, download | 8765 |
 | `parsers/` | Standalone, dependency-free modules that parse each CLI's headless stream-json output (plus fixtures + self-test) — reusable without the gateways, with protocol notes | — |
 | `skills/model-usage-cost/` | OpenClaw skill: per-model token usage and list-price cost across 1D/7D/30D windows, reconciling native OpenAI, Codex rollouts, gateway logs, archived trajectories, Claude subagents, agy conversation DBs and Dalton usage | — |
@@ -176,6 +177,7 @@ node parsers/self-test.mjs
 ```bash
 curl -s http://127.0.0.1:4568/health          # claude gateway
 curl -s http://127.0.0.1:4569/health          # antigravity gateway
+curl -s http://127.0.0.1:4570/health          # antigravity websearch service
 open http://127.0.0.1:8765                    # live log viewer
 launchctl kickstart -k gui/$UID/local.cli-gateway.claude-cli-gateway
 bash skills/model-usage-cost/scripts/run.sh summary

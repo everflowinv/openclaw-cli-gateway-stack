@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>AGY_SEARCH_MAX_CONCURRENT</key>
+		<string>8</string>
+		<key>AGY_SEARCH_PORT</key>
+		<string>4570</string>
+		<key>AGY_SEARCH_PROVIDER_ID</key>
+		<string>antigravity</string>
+		<key>HOME</key>
+		<string>__HOME__</string>
+		<key>PATH</key>
+		<string>__NODE_BIN_DIR__:__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>__LABEL__</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__NODE_BIN__</string>
+		<string>__REPO__/antigravity-cli-gateway/websearch-service.mjs</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>__OPENCLAW_LOG_DIR__/antigravity-websearch.stderr.log</string>
+	<key>StandardOutPath</key>
+	<string>__OPENCLAW_LOG_DIR__/antigravity-websearch.stdout.log</string>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>WorkingDirectory</key>
+	<string>__REPO__/antigravity-cli-gateway</string>
+</dict>
+</plist>

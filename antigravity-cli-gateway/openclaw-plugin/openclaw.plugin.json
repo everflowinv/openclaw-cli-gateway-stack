@@ -1,0 +1,28 @@
+{
+  "id": "antigravity-web-search",
+  "name": "Antigravity Web Search",
+  "description": "web_search provider backed by the local Antigravity websearch service (agy subscription-grounded Google Search).",
+  "version": "0.1.0",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "webSearchProviders": ["antigravity"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:4570"
+      },
+      "timeoutSeconds": {
+        "type": "integer",
+        "minimum": 5,
+        "maximum": 240,
+        "default": 120
+      }
+    }
+  }
+}

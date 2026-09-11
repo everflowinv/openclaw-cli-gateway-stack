@@ -21,6 +21,10 @@ Endpoints:
 The service binds to `127.0.0.1:4569` by default. OpenClaw registers this
 endpoint as the `antigravity-cli-gateway` provider.
 
+A sibling service in this folder, **`websearch-service.mjs`**, exposes the
+same subscription-grounded search as a standalone web-search endpoint — see
+[Web Search Service](#web-search-service) below.
+
 ## Differences vs claude-cli-gateway
 
 - **Text-only input.** agy's stream-json input rejects image blocks
@@ -150,3 +154,82 @@ openclaw agent --agent main --session-key agy-gateway-test \
   --model antigravity-cli-gateway/gemini-3.8-flash-low \
   --message 'ping'
 ```
+
+## Web Search Service
+
+`websearch-service.mjs` turns agy's built-in `search_web` tool (Google Search
+grounding on the Antigravity subscription — same Vertex grounding backend as
+the Gemini API) into a standalone local HTTP service with an OpenClaw
+**gemini-provider-shaped contract**: it accepts exactly the parameters the
+bundled gemini web-search provider accepts, returns exactly the payload shape
+that provider returns, and translates everything in between. Not yet wired
+into OpenClaw; intended as the backend for a future webSearch provider plugin
+or for the Dalton web-search broker path.
+
+- `GET /health`
+- `POST /v1/web-search` — body `{"query", "count", "freshness",
+  "date_after", "date_before"}` (country/language are rejected with the
+  gemini provider's exact `unsupported_*` errors), response is the gemini
+  provider's payload (`query`, `provider`, `model`, `tookMs`,
+  `externalContent`, `content` with the `EXTERNAL_UNTRUSTED_CONTENT` envelope,
+  `citations` with grounding redirect URLs already resolved to direct URLs;
+  `cached: true` on cache hits). Parameter and transport errors return the
+  provider's `{error, message, docs}` shapes over HTTP 200. Payload fidelity
+  was verified against the OpenClaw 2026.9.3 dist.
+- Binds `127.0.0.1:4570`; optional bearer auth via `AGY_SEARCH_API_KEY`.
+
+Setup: install the bundled minimal search agent (one-time; uses agy 1.2.1's
+`excludeDefaultComponents` to keep the per-search envelope at ~1.5k input
+tokens instead of ~14.2k) and start the service:
+
+```sh
+node websearch-service.mjs --install-agent   # copies websearch-agent.md
+                                              # to ~/.gemini/config/agents/
+node websearch-service.mjs                   # or run under launchd like the gateway
+
+curl -s -X POST http://127.0.0.1:4570/v1/web-search \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "openclaw cli gateway", "freshness": "week"}'
+```
+
+How the translation works:
+
+- `freshness: "day"` appends the gemini provider's exact 24-hour recency
+  instruction to the query text (soft filter, same as gemini).
+- `freshness: week/month/year` and `date_after`/`date_before` become a
+  time-range instruction in the query text. **Soft only**: agy's `search_web`
+  schema (`query`, optional `domain`, UI metadata) has no timeRangeFilter
+  parameter, so these cannot be enforced server-side like the gemini
+  provider's hard `timeRangeFilter`. If hard date filtering matters, keep the
+  Gemini API path for those calls or route by parameter.
+- Every result must come from an actual `search_web` invocation: a turn that
+  completes without calling the tool (e.g. a missing/fallback agent) fails
+  with `agy_search_ungrounded` instead of returning chat text as results.
+- `model` in the payload reports the resolved tier id (default
+  `gemini-3.8-flash-low`); the init event's agent is verified so a silently
+  fallback default agent can never serve searches.
+
+Cost profile (measured, 2026-09-11, agy 1.2.1): ~5k input + ~1.5k output
+tokens per search on the subscription; 8–15s end to end per search (agy turn
+~7–11s plus citation redirect HEAD requests). A 15-minute response cache
+(matching OpenClaw's default) absorbs repeats; TTL 0 disables.
+
+Env controls: `AGY_SEARCH_PORT` (4570), `AGY_SEARCH_API_KEY`, `AGY_CLI_BIN`,
+`AGY_SEARCH_AGENT` (websearch), `AGY_SEARCH_MODEL` (gemini-3.8-flash),
+`AGY_SEARCH_EFFORT` (low), `AGY_SEARCH_PROVIDER_ID` (gemini — set to e.g.
+`antigravity` when registering this as a distinct provider; the Dalton broker
+pins the provider id, so leaving `gemini` keeps that path drop-in),
+`AGY_SEARCH_TIMEOUT_MS` (90000), `AGY_SEARCH_STALL_MS` (60000),
+`AGY_SEARCH_MAX_CONCURRENT` (8), `AGY_SEARCH_QUEUE_TIMEOUT_MS` (60000; when all slots stay busy past this wait the service
+  responds with a `Gemini API error (429): rate limit exceeded …` shaped message, so
+  downstream rate-limit classification and retry behavior match the native gemini
+  provider being throttled),
+`AGY_SEARCH_CACHE_TTL_MS` (900000), `AGY_SEARCH_CWD` (`./websearch-cwd`).
+Logs are `[AGYWS]` JSON lines on stdout (query truncated to 120 chars;
+answers never logged).
+
+Known deviations from the gemini provider: `count` validation errors use the
+code `invalid_count`; transport failures surface as `agy_*` error codes;
+citation redirect resolution batches 16 at a time (gemini uses 10) and uses a
+strict SSRF guard without the fake-IP proxy allowance. Soft time ranges (see
+above) are the only behavioral difference in results.
