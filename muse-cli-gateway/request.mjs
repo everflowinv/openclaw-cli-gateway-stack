@@ -58,7 +58,10 @@ export function translateRequest(body, { maxPromptBytes = 2_000_000, maxImageByt
       let name = entry?.function?.name ?? entry?.name;
       if (typeof name !== 'string') continue;
       name = name.replace(/^mcp__openclaw__/, '').replace(/^openclaw__/, '');
-      if (knownTools.has(name) && !allowedTools.includes(name)) allowedTools.push(name);
+      // These two upstream catalogs are attached dynamically by the existing
+      // proxy; Firecrawl remains restricted to its proxy-owned scrape route.
+      const upstream = /^(guidepoint|alphaengine)__[A-Za-z0-9_]+$/.test(name) || name === 'firecrawl__firecrawl_scrape';
+      if ((knownTools.has(name) || upstream) && !allowedTools.includes(name)) allowedTools.push(name);
     }
   }
   const escape = s => s.replaceAll('</system_instructions>', '&lt;/system_instructions&gt;').replaceAll('</conversation_history>', '&lt;/conversation_history&gt;');
@@ -75,5 +78,8 @@ export function readToolNames(schemaPath) {
   const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
   const entries = Array.isArray(schema) ? schema : schema.tools;
   if (!Array.isArray(entries)) throw new Error('OpenClaw MCP tool schema has an unsupported shape');
-  return new Set(entries.map(x => x.name).filter(x => typeof x === 'string'));
+  // The proxy adds these locally; they deliberately do not appear in its
+  // generated gateway-tool schema. Still intersect with the request's tools.
+  const localProxyTools = ['sessions_start', 'read', 'write', 'edit', 'exec', 'glob', 'grep', 'process'];
+  return new Set([...localProxyTools, ...entries.map(x => x.name).filter(x => typeof x === 'string')]);
 }

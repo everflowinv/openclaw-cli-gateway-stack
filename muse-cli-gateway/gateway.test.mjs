@@ -7,7 +7,7 @@ import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { translateRequest, MODEL } from './request.mjs';
+import { translateRequest, readToolNames, MODEL } from './request.mjs';
 import { MuseEvents, subscriptionStatus, sanitizeError } from './process.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -35,6 +35,15 @@ test('history, Unicode byte limits, image validation and reasoning mapping', () 
   assert.throws(() => translateRequest(body([{ type: 'image_url', image_url: { url: 'https://example.com/a.png' } }])), /inline/);
   const job = translateRequest(body([{ type: 'image_url', image_url: { url: 'data:image/png;base64,YWJj' } }]));
   assert.equal(job.images[0].bytes.toString(), 'abc');
+});
+test('the proxy local file/shell tools are recognized but never implicitly granted', () => {
+  const knownTools = readToolNames(path.resolve(HERE, '../openclaw-mcp-proxy/tools-schema.json'));
+  const request = body('read fixture');
+  request.tools = [{ type: 'function', function: { name: 'read' } }];
+  assert.deepEqual(translateRequest(request, { knownTools }).allowedTools, ['read']);
+  assert.deepEqual(translateRequest(body('read fixture'), { knownTools }).allowedTools, []);
+  request.tools = ['guidepoint__search_library', 'alphaengine__get_document', 'firecrawl__firecrawl_scrape', 'firecrawl__firecrawl_search'].map(name => ({ type: 'function', function: { name } }));
+  assert.deepEqual(translateRequest(request, { knownTools }).allowedTools, ['guidepoint__search_library', 'alphaengine__get_document', 'firecrawl__firecrawl_scrape']);
 });
 test('only the verified foreground terminal can complete a request', () => {
   const parser = new MuseEvents(); parser.accept(modelEvent);
