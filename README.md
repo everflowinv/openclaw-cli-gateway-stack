@@ -1,7 +1,7 @@
 # OpenClaw CLI Gateway Stack
 
-Turn subscription-backed coding CLIs — **Claude Code** (`claude`) and
-**Google Antigravity** (`agy`) — into local OpenAI-compatible model providers
+Turn subscription-backed coding CLIs — **Claude Code** (`claude`),
+**Google Antigravity** (`agy`), and **Muse Code** (`muse`) — into local OpenAI-compatible model providers
 for [OpenClaw](https://openclaw.ai), plus a live log viewer and a token-usage
 cost tracker. Everything binds to `127.0.0.1` only.
 
@@ -47,6 +47,7 @@ the official CLIs behind a tiny local gateway means:
 |---|---|---|
 | `claude-cli-gateway/` | OpenAI-compatible façade over `claude -p --stream-json`; concurrency/queue/timeout limits; watchdog heartbeats for OpenClaw's stuck-session detector | 4568 |
 | `antigravity-cli-gateway/` | Same idea over `agy` headless print mode; reasoning-effort passthrough (`reasoning_effort` → `--effort`), stall watchdog, degraded-success salvage (an interrupted stream that still carries the full text is returned, not discarded) | 4569 |
+| `muse-cli-gateway/` | Official Muse Code device-login path for Muse Spark 1.3; per-request MCP policy, private CLI config, terminal-verified replies and cancellation | 4571 |
 | `antigravity-cli-gateway/websearch-service.mjs` + `openclaw-plugin/` | Gemini-provider-shaped web_search over agy's subscription-grounded `search_web` (minimal `excludeDefaultComponents` agent, ~5k input tokens/search); registered in OpenClaw as the `antigravity` web-search provider | 4570 |
 | `live-log-viewer/` | Python SSE server + one HTML page with a tab per gateway: per-request blocks, thinking/text, tool calls with arguments/outputs, regex + session filters, follow mode, download | 8765 |
 | `openclaw-mcp-proxy/` | The OpenClaw MCP bridge: stdio server exposing OpenClaw's tools (exec/read/write/…) to claude, agy, codex and Claude Code; unit + integration tests, regenerable tool schema | — |
@@ -169,6 +170,7 @@ These tests use synthetic CLI output and do not make model requests:
 node --test lib/cli-output.test.mjs
 node claude-cli-gateway/server.integration.test.mjs
 node antigravity-cli-gateway/server.integration.test.mjs
+node --test muse-cli-gateway/gateway.test.mjs
 node parsers/self-test.mjs
 node --test 'openclaw-mcp-proxy/'.*.test.js   # or: cd openclaw-mcp-proxy && node --test *.test.js
 ```
