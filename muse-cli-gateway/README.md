@@ -2,7 +2,7 @@
 
 沿用本仓库 Claude CLI / Antigravity CLI 的结构：OpenClaw 调用本机 OpenAI 兼容接口，网关启动官方 `muse exec`，工具操作交给现有 OpenClaw MCP proxy。
 
-默认仅监听 `127.0.0.1:4571`，模型为 `muse-spark-1.3`。不直连 Meta 推理 API，不提取或转发订阅 token，不自动切到 API key 付费。
+默认仅监听 `127.0.0.1:4571`，支持 `muse-spark-1.3` 与 `muse-spark-1.3-contributor`。不直连 Meta 推理 API，不提取或转发订阅 token，不自动切到 API key 付费。
 
 ## 认证与隔离
 
@@ -18,7 +18,7 @@
 ## 接口
 
 - `GET /health`：CLI 版本、认证元数据是否满足订阅路径、队列状态。
-- `GET /v1/models`：唯一模型 `muse-spark-1.3`。
+- `GET /v1/models`：Standard 与 Contributor 两个模型，含安全上下文和 API 刊例价格。
 - `POST /v1/chat/completions`：文本、内联 PNG/JPEG/WebP 图片；JSON 或 SSE。
 
 SSE 先发角色与运行/工具进度，正文在前台任务终态成功且 CLI 正常退出后交付。失败任务的中间文本不会冒充成功答案。`run.model.configured` 必须确认 `meta / muse-spark-1.3`，子任务终态不会完成主请求。
@@ -27,7 +27,8 @@ SSE 先发角色与运行/工具进度，正文在前台任务终态成功且 CL
 
 ### 限制
 
-- Muse Code 1.3.0 实测 JSONL 没有可用的完整 token 计数；响应不伪造 `usage`，`/health` 标明 `usageAvailable: false`。OpenClaw 的 API 标价元数据只用于估算，不能当作订阅账单。
+- 用量来自官方临时会话账本中的 `model_completed`，不是 stdout JSONL。主调用和后台观察器一起计入，按源记录 ID 去重；缓存属于输入、推理属于输出，不重复相加。原始会话目录提取完即删除，只在服务日志保留计数和技术 ID。未报告的调用不填零；旧版未落盘请求无法补回。
+- API 刊例估算不是订阅实付：Standard 输入/缓存/输出为 $1.25/$0.15/$4.25，Contributor 为 $0.10/$0.002/$0.20，每百万 tokens。Contributor 允许输入/输出用于训练，不应承载敏感资料。
 - `max_tokens` 不会变成 CLI 的精确输出 token 上限；目前用总超时、流停滞超时和 `max-model-steps` 控制请求。
 - 不接受远程图片 URL；OpenClaw 应先下载并以内联 data URI 提供图片。图片按编号与消息历史关联，通过官方 `--image` 输入。
 - 本版使用稳定的 `exec --json`。MSP `serve` 在本机探针中接受 turn 后未完成输出，因此没有部署未经验证的 MSP 路径。
@@ -45,7 +46,7 @@ SSE 先发角色与运行/工具进度，正文在前台任务终态成功且 CL
 - `MUSE_CLI_GATEWAY_STALL_MS`：默认 `300000`。
 - `MUSE_CLI_GATEWAY_MAX_MODEL_STEPS`：默认 `100`。
 - `MUSE_CLI_GATEWAY_EXEC_MAX_TIMEOUT_MS`：默认 `600000`。
-- `MUSE_CLI_GATEWAY_MAX_PROMPT_BYTES`：默认 `2000000`，按 UTF-8 字节检查。
+- `MUSE_CLI_GATEWAY_MAX_PROMPT_BYTES`：默认 `1400000`（不可通过环境变量上调），按 UTF-8 字节检查。
 - `MUSE_CLI_GATEWAY_STATE_DIR`：默认 `~/.openclaw/state/muse-cli-gateway`。
 - `MUSE_CLI_GATEWAY_API_KEY`：可选的本地网关认证，不是 Meta 凭据。
 - `MUSE_CLI_GATEWAY_MCP_PROXY`：默认本仓库的 `openclaw-mcp-proxy/server.js`。
@@ -80,3 +81,13 @@ curl --fail http://127.0.0.1:4571/health
 - <https://dev.meta.ai/docs/muse-code/subscriptions.md>
 - <https://dev.meta.ai/docs/muse-code/auth.md>
 - <https://dev.meta.ai/docs/muse-code/extending.md>
+
+## 实际上下文与看板
+
+API 宣传窗口为1,048,576，CLI目录报告1,007,997，但本机1.3.0运行时的压缩策略使用512,000预算，软/硬阈值分别384,000/460,800。2.5MB及更大测试被自动压缩，只保留尾部校验值，CLI仍exit0。
+
+两种模型均通过约1.4MB、约400k已报告输入tokens的6个随机校验值测试；中文900k字节测试也完整通过。为给CLI自身提示及工具上下文留余量，OpenClaw配置安全context为384,000，文本网关上限1,400,000 UTF-8字节。逐请求还检查首轮模型输入的current_user_message_bytes，若CLI预先压缩/裁剪原文则返回413，绝不把截短回答报成成功。计费用量不是上下文占用量，不能混用。
+
+CLI模型目录的output_limit为128,000；它是模型能力元数据，不是此网关对max_tokens的硬执行保证。Contributor目录列出max且本机max短请求通过；API Models页面对max仅Standard的描述与CLI实际行为不同，接入按本次CLI证据记录。
+
+现有HTML看板增加Muse Code页签：`http://127.0.0.1:8765/#muse-cli-gateway`。显示请求状态、主/后台用量、缓存、推理、刊例估算及覆盖缺口；usage/done重复事件按请求ID合并，不双计。仅显示当前加载日志，不是全历史账单。

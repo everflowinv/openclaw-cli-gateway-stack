@@ -9,6 +9,7 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { translateRequest, readToolNames, MODEL } from './request.mjs';
 import { MuseEvents, subscriptionStatus, sanitizeError } from './process.mjs';
+import { CONTRIBUTOR_MODEL } from './catalog.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const body = content => ({ model: MODEL, messages: [{ role: 'user', content }] });
@@ -73,8 +74,13 @@ if (process.env.META_API_KEY || process.env.MODEL_API_KEY) process.exit(12);
 if (!args.includes('--disable-shell') || !args.includes('--disable-write')) process.exit(13);
 const cfg = JSON.parse(fs.readFileSync(path.join(process.env.XDG_CONFIG_HOME,'muse/settings.json')));
 const prompt = fs.readFileSync(value('--prompt-file'), 'utf8');
+const selectedModel=value('--model');
+const journalDir=path.join(process.env.XDG_DATA_HOME,'muse/sessions/test/fixture-session');fs.mkdirSync(journalDir,{recursive:true});
+const journal=(id,event,run='fixture-root')=>({id,stream:{id:'fixture-session'},payload:{run_id:run,source_run_record_id:id,event}});
+const records=[journal('trace',{kind:'model_input_trace_recorded',model_step:0,scope:'full_request',bounded:{current_user_message_bytes:prompt.includes('CASE=truncated')?0:Buffer.byteLength(prompt),total_lane_bytes:Buffer.byteLength(prompt)+1000}}),journal('call1',{kind:'model_completed',model:selectedModel,usage:{input_tokens:1000,output_tokens:100,cached_tokens:800,reasoning_tokens:25}})];
+fs.writeFileSync(path.join(journalDir,'session.jsonl'),records.map(r=>JSON.stringify(r)).join('\\n')+'\\n');
 const emit=(type,p={})=>console.log(JSON.stringify({payload_type:type,stream:{id:'fixture-session'},payload:{...p,run_stream:{id:'fixture-root'}}}));
-emit('run.model.configured',{provider_id:'meta',model_id:prompt.includes('CASE=wrong')?'muse-spark-1.2':'muse-spark-1.3'});
+emit('run.model.configured',{provider_id:'meta',model_id:prompt.includes('CASE=wrong')?'muse-spark-1.2':selectedModel});
 if(prompt.includes('CASE=incomplete')) process.exit(0);
 if(prompt.includes('CASE=hang')) { setInterval(()=>{},1000); }
 else setTimeout(()=>{
@@ -110,25 +116,30 @@ after(async () => {
 });
 const request = (data, options = {}) => fetch(base + '/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(data), ...options });
 
-test('HTTP success has correct model, isolated MCP policy, Unicode and no fabricated usage', async () => {
+test('HTTP success has correct model, isolated MCP policy, Unicode and reported usage', async () => {
   const b = body('CASE=ok'); b.messages.unshift({ role: 'system', content: 'session=agent:main:test' });
   b.tools = [{ type: 'function', function: { name: 'session_status' } }];
   const r = await request(b); assert.equal(r.status, 200);
-  const d = await r.json(); assert.equal(d.model, MODEL); assert.equal(d.usage, undefined);
+  const d = await r.json(); assert.equal(d.model, MODEL); assert.equal(d.usage.total_tokens, 1100); assert.equal(d.usage.prompt_tokens_details.cached_tokens, 800);
   assert.deepEqual(JSON.parse(d.choices[0].message.content), { text: '好😀', tools: 'session_status', session: 'agent:main:test' });
   assert.equal(fs.readdirSync(path.join(root, 'state')).length, 0);
   const empty = await (await request({ ...b, tools: [] })).json();
   assert.equal(JSON.parse(empty.choices[0].message.content).tools, null);
+  const contributor = await (await request({ ...body('CASE=ok'), model: CONTRIBUTOR_MODEL })).json();
+  assert.equal(contributor.model, CONTRIBUTOR_MODEL); assert.equal(contributor.usage.total_tokens, 1100);
 });
 test('SSE success is terminal-verified; a failed partial reply is not returned as success', async () => {
-  const text = await (await request({ ...body('CASE=ok'), stream: true })).text();
+  const text = await (await request({ ...body('CASE=ok'), stream: true, stream_options: { include_usage: true } })).text();
   assert.match(text, /chat.completion.chunk/); assert.match(text, /"finish_reason":"stop"/); assert.match(text, /\[DONE\]/);
+  assert.match(text, /"total_tokens":1100/);
   const failed = await (await request({ ...body('CASE=fail'), stream: true })).text();
   assert.match(failed, /MUSE_TURN_FAILED/); assert.doesNotMatch(failed, /partial answer/); assert.doesNotMatch(failed, /"finish_reason":"stop"/);
 });
 test('wrong model, missing terminal, invalid model and browser requests fail explicitly', async () => {
   assert.equal((await request(body('CASE=wrong'))).status, 502);
   assert.equal((await request(body('CASE=incomplete'))).status, 502);
+  const truncated = await request(body('CASE=truncated')); assert.equal(truncated.status, 413);
+  assert.equal((await truncated.json()).error.code, 'MUSE_INPUT_NOT_PRESERVED');
   assert.equal((await request({ ...body('x'), model: 'other' })).status, 400);
   assert.equal((await request(body('x'), { headers: { origin: 'https://example.com' } })).status, 403);
 });

@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { MODEL, EFFORTS, failure, readToolNames, translateRequest } from './request.mjs';
 import { runMuse, sanitizeError, subscriptionStatus } from './process.mjs';
+import { MODELS, SAFE_CONTEXT, MAX_PROMPT_BYTES } from './catalog.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 function envNumber(name, fallback, min, max) {
@@ -22,7 +23,7 @@ const PORT = envNumber('MUSE_CLI_GATEWAY_PORT', 4571, 1, 65535);
 const LIMIT = envNumber('MUSE_CLI_GATEWAY_MAX_CONCURRENT', 2, 1, 16);
 const QUEUE_MS = envNumber('MUSE_CLI_GATEWAY_QUEUE_TIMEOUT_MS', 120000, 100, 600000);
 const MAX_BODY = envNumber('MUSE_CLI_GATEWAY_MAX_BODY_BYTES', 32 * 1024 ** 2, 1024, 128 * 1024 ** 2);
-const MAX_PROMPT = envNumber('MUSE_CLI_GATEWAY_MAX_PROMPT_BYTES', 2_000_000, 1000, 10_000_000);
+const MAX_PROMPT = envNumber('MUSE_CLI_GATEWAY_MAX_PROMPT_BYTES', MAX_PROMPT_BYTES, 1000, MAX_PROMPT_BYTES);
 const API_KEY = process.env.MUSE_CLI_GATEWAY_API_KEY ?? '';
 const config = {
   cliBin: process.env.MUSE_CLI_BIN ?? path.join(HOME_DIR, '.local/bin/muse'),
@@ -79,12 +80,12 @@ async function chat(req, res, body) {
   req.on('aborted', disconnected); res.on('close', disconnected);
   const requestId = randomUUID(), created = Math.floor(Date.now() / 1000), started = Date.now();
   const id = `chatcmpl-muse-cli-${requestId}`;
-  const chunk = (delta, finish_reason = null) => ({ id, object: 'chat.completion.chunk', created, model: MODEL, choices: [{ index: 0, delta, finish_reason }] });
+  const chunk = (delta, finish_reason = null) => ({ id, object: 'chat.completion.chunk', created, model: job.model, choices: [{ index: 0, delta, finish_reason }] });
   let slot, heartbeat;
   try {
     slot = await acquire(controller.signal);
     if (controller.signal.aborted) throw failure('Request cancelled', 'MUSE_CANCELLED', 499);
-    log(requestId, 'start', { model: MODEL, effort: job.effort, session: job.requesterSessionKey ?? null, tools: job.allowedTools, imageCount: job.images.length, promptBytes: Buffer.byteLength(job.prompt), auth: 'official-muse-device-login' });
+    log(requestId, 'start', { model: job.model, effort: job.effort, session: job.requesterSessionKey ?? null, tools: job.allowedTools, imageCount: job.images.length, promptBytes: Buffer.byteLength(job.prompt), stream: job.stream, auth: 'official-muse-device-login', contextWindow: SAFE_CONTEXT, maxPromptBytes: MAX_PROMPT });
     if (job.stream) {
       res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-accel-buffering': 'no' });
       sse(res, chunk({ role: 'assistant', content: '' }));
@@ -97,15 +98,17 @@ async function chat(req, res, body) {
         log(requestId, event, data);
         if (job.stream && event === 'tool_result') sse(res, chunk({ reasoning_content: '[Muse CLI tool completed]\n' }));
       },
+      onUsage: accounting => log(requestId, 'usage', { usageSchema: accounting.schema, usage: accounting.usage, mainUsage: accounting.main, backgroundUsage: accounting.background, modelCalls: accounting.calls, estimatedCostUsd: accounting.estimatedCostUsd, coverage: accounting.coverage, inputIntegrity: accounting.input }),
     });
     if (job.stream) {
       // Deliver only the verified foreground final. Prose emitted before a tool
       // failure is not an answer, and unknown token usage is never fabricated.
       sse(res, chunk({ content: result.text }));
       sse(res, chunk({}, 'stop'));
+      if (job.includeUsage && result.usage) sse(res, { id, object: 'chat.completion.chunk', created, model: job.model, choices: [], usage: result.usage });
       if (!res.destroyed) res.end('data: [DONE]\n\n');
-    } else json(res, 200, { id, object: 'chat.completion', created, model: MODEL, choices: [{ index: 0, message: { role: 'assistant', content: result.text }, finish_reason: 'stop' }] });
-    log(requestId, 'done', { model: result.model, museSessionId: result.sessionId, durationMs: Date.now() - started, responseChars: result.text.length, usageAvailable: false });
+    } else json(res, 200, { id, object: 'chat.completion', created, model: job.model, choices: [{ index: 0, message: { role: 'assistant', content: result.text }, finish_reason: 'stop' }], ...(result.usage ? { usage: result.usage } : {}) });
+    log(requestId, 'done', { model: result.model, museSessionId: result.sessionId, durationMs: Date.now() - started, responseChars: result.text.length, usageAvailable: Boolean(result.usage), usage: result.usage, estimatedCostUsd: result.accounting?.estimatedCostUsd, reportedCalls: result.accounting?.coverage.reportedCalls });
   } catch (e) {
     log(requestId, 'error', { code: e.code ?? 'MUSE_ERROR', message: sanitizeError(e.message), durationMs: Date.now() - started });
     if (res.headersSent) { sse(res, errorBody(e)); if (!res.destroyed) res.end('data: [DONE]\n\n'); }
@@ -121,9 +124,9 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     if (req.method === 'GET' && url.pathname === '/health') {
       const auth = subscriptionStatus(config.authPath);
-      return json(res, cliVersion && auth.ready ? 200 : 503, { status: cliVersion && auth.ready ? 'ok' : 'degraded', cliVersion, auth, activeRequests: active, queuedRequests: waiters.length, maxConcurrent: LIMIT, model: MODEL, input: ['text', 'image'], reasoningEfforts: EFFORTS, usageAvailable: false });
+      return json(res, cliVersion && auth.ready ? 200 : 503, { status: cliVersion && auth.ready ? 'ok' : 'degraded', cliVersion, auth, activeRequests: active, queuedRequests: waiters.length, maxConcurrent: LIMIT, models: [...MODELS.keys()], input: ['text', 'image'], reasoningEfforts: EFFORTS, usageAvailable: true, usageSource: 'reported-session-journal', contextWindow: SAFE_CONTEXT, maxPromptBytes: MAX_PROMPT });
     }
-    if (req.method === 'GET' && url.pathname === '/v1/models') return json(res, 200, { object: 'list', data: [{ id: MODEL, object: 'model', owned_by: 'meta-via-official-muse-code' }] });
+    if (req.method === 'GET' && url.pathname === '/v1/models') return json(res, 200, { object: 'list', data: [...MODELS.values()].map(m => ({ id: m.id, object: 'model', owned_by: 'meta-via-official-muse-code', context_window: SAFE_CONTEXT, max_output_tokens: 128000, pricing: { input: m.input, cached_input: m.cacheRead, output: m.output, unit: 'USD/1M tokens', basis: 'API list-price estimate' } })) });
     if (req.method === 'POST' && url.pathname === '/v1/chat/completions') {
       if (API_KEY && req.headers.authorization !== `Bearer ${API_KEY}`) return json(res, 401, { error: { message: 'Invalid gateway credential' } });
       return await chat(req, res, await readBody(req));

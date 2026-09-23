@@ -12,6 +12,8 @@
 		<string>__OPENCLAW_LOG_DIR__/claude-cli-gateway.stdout.log</string>
 		<string>--file</string>
 		<string>__OPENCLAW_LOG_DIR__/antigravity-cli-gateway.stdout.log</string>
+		<string>--file</string>
+		<string>__OPENCLAW_LOG_DIR__/muse-cli-gateway.stdout.log</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>

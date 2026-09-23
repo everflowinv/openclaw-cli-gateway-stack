@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CLI Gateway Logs</title>
+<title>CLI 网关运行看板</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: #0d1117; color: #c9d1d9; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; height: 100vh; display: flex; flex-direction: column; }
@@ -44,34 +44,52 @@
   .session-chip { display: inline-block; font-size: 10px; padding: 0 6px; border-radius: 8px; margin-right: 8px; vertical-align: 1px; color: #0d1117; font-weight: 700; }
   #stats { background: #161b22; border-top: 1px solid #30363d; padding: 5px 16px; font-size: 11px; color: #8b949e; flex-shrink: 0; display: flex; gap: 16px; }
   .hidden { display: none !important; }
+  #metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; padding: 12px 16px 8px; flex-shrink: 0; }
+  .metric { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; }
+  .metric .label { color: #8b949e; font-size: 11px; }
+  .metric .value { color: #f0f6fc; font-size: 21px; margin: 5px 0; font-weight: 600; }
+  .metric .detail { color: #8b949e; font-size: 10px; min-height: 14px; }
+  #source-note { color: #8b949e; padding: 0 16px 8px; font-size: 11px; flex-shrink: 0; }
+  #model-summary { display: flex; gap: 8px; padding: 0 16px 10px; flex-wrap: wrap; flex-shrink: 0; }
+  .model-pill { text-align: left; font-size: 11px; }
+  @media(max-width: 850px) { #header { flex-wrap: wrap; } #filename { display: none; } #metrics { grid-template-columns: repeat(2, 1fr); } #filter-bar { flex-wrap: wrap; } }
 </style>
 </head>
 <body>
 <div id="header">
-  <h1>📋 Gateway Logs</h1>
+  <h1>CLI 网关运行看板</h1>
   <div id="tabs"></div>
-  <span id="filename">Loading...</span>
-  <span id="status">Connecting...</span>
+  <span id="filename">加载中…</span>
+  <span id="status">连接中…</span>
   <div id="controls">
-    <button id="btn-follow" class="active" onclick="toggleFollow()">Follow</button>
-    <button onclick="clearView()">Clear</button>
-    <button onclick="downloadLog()">Download</button>
+    <button id="btn-follow" class="active" onclick="toggleFollow()">跟随日志</button>
+    <button onclick="clearView()">清空视图</button>
+    <button onclick="downloadLog()">下载日志</button>
   </div>
 </div>
+<div id="metrics">
+  <div class="metric"><div class="label">已加载请求</div><div class="value" id="metric-requests">0</div><div class="detail">按请求 ID 去重</div></div>
+  <div class="metric"><div class="label">运行中 / 失败</div><div class="value" id="metric-running">0 / 0</div><div class="detail" id="metric-success">已完成 0</div></div>
+  <div class="metric"><div class="label">已报告 tokens</div><div class="value" id="metric-tokens">—</div><div class="detail" id="metric-cache">缓存为输入子集，不重复相加</div></div>
+  <div class="metric"><div class="label">API 刊例估算</div><div class="value" id="metric-cost">—</div><div class="detail" id="metric-cost-detail">美元；不是订阅实付</div></div>
+  <div class="metric"><div class="label">用量覆盖</div><div class="value" id="metric-coverage">0 / 0</div><div class="detail" id="metric-background">计数未知不填零</div></div>
+</div>
+<div id="source-note">汇总当前加载的最近请求，最多 1,000 条；不受文本筛选影响。</div>
+<div id="model-summary"></div>
 <div id="filter-bar">
   <select id="session-filter" onchange="applyFilter()">
-    <option value="">All requests</option>
+    <option value="">全部请求</option>
   </select>
-  <input id="filter" type="text" placeholder="Filter rendered text... (regex supported)" oninput="applyFilter()">
-  <button onclick="document.getElementById('filter').value=''; document.getElementById('session-filter').value=''; applyFilter()">Clear Filter</button>
+  <input id="filter" type="text" placeholder="筛选已显示内容（支持正则表达式）" oninput="applyFilter()">
+  <button onclick="document.getElementById('filter').value=''; document.getElementById('session-filter').value=''; applyFilter()">重置筛选</button>
 </div>
 <div id="log-root"></div>
 <div id="stats">
-  <span id="stat-lines">Lines: 0</span>
-  <span id="stat-shown">Shown: 0</span>
-  <span id="stat-sessions">Requests: 0</span>
-  <span id="stat-errors">Errors: 0</span>
-  <span id="stat-scroll">Scroll: bottom</span>
+  <span id="stat-lines">日志行：0</span>
+  <span id="stat-shown">显示：0</span>
+  <span id="stat-sessions">请求：0</span>
+  <span id="stat-errors">错误：0</span>
+  <span id="stat-scroll">位置：底部</span>
 </div>
 
 <script>
@@ -117,7 +135,7 @@
   // scrolling back to the bottom re-enables follow
   function updateScrollStat() {
     const distance = logRoot.scrollHeight - logRoot.scrollTop - logRoot.clientHeight;
-    document.getElementById('stat-scroll').textContent = distance < 30 ? 'Scroll: bottom' : `Scroll: +${Math.round(distance)}px`;
+    document.getElementById('stat-scroll').textContent = distance < 30 ? '位置：底部' : `位置：+${Math.round(distance)}px`;
   }
   logRoot.addEventListener('scroll', () => {
     const atBottom = logRoot.scrollHeight - logRoot.scrollTop - logRoot.clientHeight < 30;
@@ -132,6 +150,7 @@
       allLines: [],             // raw lines, for Download
       items: [],                // rendered items: {el, session, getText()}
       sessions: new Map(),      // tag8 -> {color, openBlock}
+      requests: new Map(),      // one accounting record per gateway request
       errorCount: 0,
       unseenErrors: 0,
       lastSeq: null,
@@ -192,7 +211,7 @@
   function updateShown(src) {
     let shown = 0;
     for (const it of src.state.items) if (!it.el.classList.contains('hidden')) shown++;
-    if (src === active) document.getElementById('stat-shown').textContent = `Shown: ${shown}`;
+    if (src === active) document.getElementById('stat-shown').textContent = `显示：${shown}`;
   }
 
   function refreshItemVisibility(src, item) {
@@ -224,7 +243,7 @@
     b.chars += text.length;
     b.text += text;
     b.body.textContent = b.text;
-    b.label.textContent = `▸ thinking ×${b.count} (${b.chars >= 1000 ? (b.chars / 1000).toFixed(1) + 'k' : b.chars} chars)`;
+    b.label.textContent = `▸ 推理 ×${b.count} (${b.chars >= 1000 ? (b.chars / 1000).toFixed(1) + 'k' : b.chars} chars)`;
     refreshItemVisibility(src, b.item);
     if (src === active) scheduleScroll();
   }
@@ -272,18 +291,70 @@
   // ───────── log line parsing (shared by all gateways) ─────────
   const PREFIX_RE = /^\[[A-Z0-9]+GW\] /;
 
+  function trackRequest(src, obj) {
+    if (!obj.request) return;
+    const map = src.state.requests;
+    if (!map.has(obj.request)) map.set(obj.request, { model: obj.model || '未记录模型', status: 'unknown', usage: null, cost: null, background: null });
+    const r = map.get(obj.request);
+    if (obj.model) r.model = obj.model;
+    if (obj.event === 'start') { r.status = 'running'; r.context = obj.contextWindow; r.bytes = obj.maxPromptBytes; }
+    if (obj.event === 'done') r.status = 'done';
+    if (obj.event === 'error' || obj.event === 'cancel') r.status = 'error';
+    if (obj.event === 'usage' || obj.event === 'done') {
+      if (Number.isFinite(obj.usage?.total_tokens)) r.usage = obj.usage;
+      if (Number.isFinite(obj.estimatedCostUsd)) r.cost = obj.estimatedCostUsd;
+      if (obj.backgroundUsage) r.background = obj.backgroundUsage;
+      if (obj.coverage) r.coverage = obj.coverage;
+    }
+    while (map.size > 1000) map.delete(map.keys().next().value);
+    if (src === active) renderMetrics(src);
+  }
+  const number = value => Number(value).toLocaleString('zh-CN');
+  function renderMetrics(src) {
+    const rows = [...src.state.requests.values()];
+    const measured = rows.filter(r => r.usage), priced = rows.filter(r => r.cost !== null);
+    const terminal = rows.filter(r => r.status === 'done' || r.status === 'error');
+    const sum = (list, fn) => list.reduce((n, r) => n + (fn(r) || 0), 0);
+    document.getElementById('metric-requests').textContent = number(rows.length);
+    document.getElementById('metric-running').textContent = `${rows.filter(r => r.status === 'running').length} / ${rows.filter(r => r.status === 'error').length}`;
+    document.getElementById('metric-success').textContent = `已完成 ${rows.filter(r => r.status === 'done').length}`;
+    document.getElementById('metric-tokens').textContent = measured.length ? number(sum(measured, r => r.usage.total_tokens)) : '—';
+    document.getElementById('metric-cache').textContent = measured.length ? `输入 ${number(sum(measured, r => r.usage.prompt_tokens))} · 输出 ${number(sum(measured, r => r.usage.completion_tokens))} · 缓存 ${number(sum(measured, r => r.usage.prompt_tokens_details?.cached_tokens))}` : '尚无已报告用量';
+    document.getElementById('metric-cost').textContent = priced.length ? '$' + sum(priced, r => r.cost).toFixed(6) : '—';
+    document.getElementById('metric-cost-detail').textContent = `${priced.length} 条请求有估价；不是订阅实付`;
+    document.getElementById('metric-coverage').textContent = `${terminal.filter(r => r.usage).length} / ${terminal.length}`;
+    const bg = sum(rows, r => r.background?.total_tokens);
+    document.getElementById('metric-background').textContent = rows.some(r => r.coverage?.includesBackground) ? `后台已报告 ${number(bg)} tokens（已含在合计）` : '后台用量未单列';
+    const isMuse = src.id.includes('muse');
+    document.getElementById('source-note').textContent = '汇总当前加载的最近请求，最多 1,000 条；不受文本筛选影响。' + (isMuse ? ' Muse 仅保留运行信息和计数，不记录正文。缺少服务端计数的调用不填零。' : ' 未提供价格或用量的请求单独留空。');
+    const models = new Map();
+    for (const r of rows) {
+      if (!models.has(r.model)) models.set(r.model, { count: 0, tokens: 0, context: r.context, bytes: r.bytes });
+      const m = models.get(r.model); m.count++; m.tokens += r.usage?.total_tokens || 0;
+      m.context ||= r.context; m.bytes ||= r.bytes;
+    }
+    const target = document.getElementById('model-summary'); target.replaceChildren();
+    for (const [name, m] of models) {
+      const button = document.createElement('button'); button.className = 'model-pill';
+      button.textContent = `${name} · ${m.count} 次 · ${number(m.tokens)} 已报告 tokens${m.context ? ` · context ${number(m.context)}` : ''}${name.includes('contributor') ? ' · 输入/输出可用于训练' : ''}`;
+      button.onclick = () => { document.getElementById('filter').value = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); applyFilter(); };
+      target.appendChild(button);
+    }
+  }
+
   function processLine(src, raw) {
     if (raw == null || raw === '') return;
     const st = src.state;
     st.allLines.push(raw);
     if (st.allLines.length > MAX_RAW_LINES) st.allLines.shift();
-    if (src === active) document.getElementById('stat-lines').textContent = `Lines: ${st.allLines.length}`;
+    if (src === active) document.getElementById('stat-lines').textContent = `日志行：${st.allLines.length}`;
 
     if (!PREFIX_RE.test(raw)) return;
     let obj;
     try { obj = JSON.parse(raw.replace(PREFIX_RE, '')); }
     catch (e) { return; }
     if (!obj || !obj.event) return;
+    trackRequest(src, obj);
 
     const tag = obj.request || '(gateway)';
     if (obj.event === 'thinking' && typeof obj.text === 'string') {
@@ -302,6 +373,16 @@
       if (obj.permissionMode) init.push(`permissions=${obj.permissionMode}`);
       if (obj.toolCount != null) init.push(`tools=${obj.toolCount}`);
       appendHeader(src, tag, `init${init.length ? ' ' + init.join(' ') : ''}`, false);
+    } else if (obj.event === 'model') {
+      appendHeader(src, tag, `已确认模型 ${obj.model}${obj.sessionId ? ' · CLI 会话 ' + obj.sessionId : ''}`, false);
+    } else if (obj.event === 'tool_result') {
+      appendHeader(src, tag, `工具完成${obj.callId ? ' · ' + obj.callId : ''}`, false);
+    } else if (obj.event === 'usage') {
+      const u = obj.usage;
+      const note = u ? `已报告用量：输入 ${number(u.prompt_tokens)}（缓存 ${number(u.prompt_tokens_details?.cached_tokens || 0)}）· 输出 ${number(u.completion_tokens)}（推理 ${number(u.completion_tokens_details?.reasoning_tokens || 0)}）` : '本请求没有可用的服务端 token 计数';
+      const price = Number.isFinite(obj.estimatedCostUsd) ? ` · 刊例估算 $${obj.estimatedCostUsd.toFixed(6)}` : '';
+      appendHeader(src, tag, note + price, false);
+      if (obj.inputIntegrity?.verified === false) appendHeader(src, tag, '输入完整性未通过；不会把截短后的回答当作成功结果', true);
     } else if (obj.event === 'tool') {
       const args = obj.args ? ` ${obj.args}` : '';
       const via = obj.via ? ` (via ${obj.via})` : '';
@@ -351,11 +432,12 @@
       s.container.classList.toggle('active', s === src);
     }
     src.state.unseenErrors = 0;
+    history.replaceState(null, '', '#' + encodeURIComponent(src.id));
     renderTabBadge(src);
     document.getElementById('filename').textContent = src.file || '';
     // session dropdown is per-source: rebuild from this source's sessions
     const requestSelect = document.getElementById('session-filter');
-    requestSelect.innerHTML = '<option value="">All requests</option>';
+    requestSelect.innerHTML = '<option value="">全部请求</option>';
     for (const tag of src.state.sessions.keys()) {
       const opt = document.createElement('option');
       opt.value = tag;
@@ -365,6 +447,7 @@
     requestSelect.value = '';
     sessionFilter = '';
     updateStats(src);
+    renderMetrics(src);
     for (const it of src.state.items) it.el.classList.toggle('hidden', !itemVisible(src.state, it));
     updateShown(src);
     if (following) logRoot.scrollTop = logRoot.scrollHeight;
@@ -372,9 +455,9 @@
 
   function updateStats(src) {
     if (src !== active) return;
-    document.getElementById('stat-lines').textContent = `Lines: ${src.state.allLines.length}`;
-    document.getElementById('stat-sessions').textContent = `Requests: ${src.state.sessions.size}`;
-    document.getElementById('stat-errors').textContent = `Errors: ${src.state.errorCount}`;
+    document.getElementById('stat-lines').textContent = `日志行：${src.state.allLines.length}`;
+    document.getElementById('stat-sessions').textContent = `请求：${src.state.sessions.size}`;
+    document.getElementById('stat-errors').textContent = `错误：${src.state.errorCount}`;
     updateShown(src);
   }
 
@@ -398,15 +481,17 @@
     st.unseenErrors = 0;
     active.container.innerHTML = '';
     st.sessions.clear();
+    st.requests.clear();
+    renderMetrics(active);
     renderTabBadge(active);
     const requestSelect = document.getElementById('session-filter');
-    requestSelect.innerHTML = '<option value="">All requests</option>';
+    requestSelect.innerHTML = '<option value="">全部请求</option>';
     requestSelect.value = '';
     sessionFilter = '';
-    document.getElementById('stat-lines').textContent = 'Lines: 0';
-    document.getElementById('stat-shown').textContent = 'Shown: 0';
-    document.getElementById('stat-sessions').textContent = 'Requests: 0';
-    document.getElementById('stat-errors').textContent = 'Errors: 0';
+    document.getElementById('stat-lines').textContent = '日志行：0';
+    document.getElementById('stat-shown').textContent = '显示：0';
+    document.getElementById('stat-sessions').textContent = '请求：0';
+    document.getElementById('stat-errors').textContent = '错误：0';
   }
 
   function downloadLog() {
@@ -429,7 +514,7 @@
     if (st.es) st.es.close();
     st.lastActivity = Date.now();
     if (src === active) {
-      statusEl.textContent = 'Connecting...';
+      statusEl.textContent = '连接中…';
       statusEl.className = '';
     }
 
@@ -437,7 +522,7 @@
     st.es = new EventSource(`/stream?source=${encodeURIComponent(src.id)}${since}`);
     st.es.onopen = () => {
       st.lastActivity = Date.now();
-      if (src === active) { statusEl.textContent = '● Live'; statusEl.className = ''; }
+      if (src === active) { statusEl.textContent = '● 实时连接'; statusEl.className = ''; }
     };
     st.es.onmessage = (e) => {
       st.lastActivity = Date.now();
@@ -455,7 +540,7 @@
     });
     st.es.onerror = () => {
       if (src === active) {
-        statusEl.textContent = '● Disconnected';
+        statusEl.textContent = '● 已断开';
         statusEl.className = 'error';
       }
       st.es.close();
@@ -467,7 +552,7 @@
     for (const src of sources) {
       if (Date.now() - src.state.lastActivity > 30000) {
         if (src === active) {
-          statusEl.textContent = '● Stale, reconnecting...';
+          statusEl.textContent = '● 正在重新连接…';
           statusEl.className = 'error';
         }
         connect(src);
@@ -507,9 +592,9 @@
       sources.push(src);
       connect(src);
     }
-    if (sources.length) switchTab(sources[0]);
+    if (sources.length) switchTab(sources.find(s => s.id === decodeURIComponent(location.hash.slice(1))) || sources[0]);
   }).catch(() => {
-    statusEl.textContent = '● Failed to load sources';
+    statusEl.textContent = '● 日志来源加载失败';
     statusEl.className = 'error';
   });
 </script>

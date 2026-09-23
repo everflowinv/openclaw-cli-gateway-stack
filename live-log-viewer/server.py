@@ -49,6 +49,7 @@ class Source:
             'claude': 'Claude CLI',
             'antigravity': 'Antigravity CLI',
             'agy': 'Antigravity CLI',
+            'muse': 'Muse Code',
         }
         self.label = known.get(base, stem)
         self.history = deque(maxlen=HISTORY_MAX)

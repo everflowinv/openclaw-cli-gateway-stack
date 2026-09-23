@@ -4,6 +4,7 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { failure, MODEL } from './request.mjs';
+import { collectUsage } from './usage.mjs';
 
 export function subscriptionStatus(authPath) {
   try {
@@ -21,13 +22,13 @@ export function sanitizeError(value) {
 // This consumes only the foreground run's authoritative terminal record. A CLI
 // exit code of zero or a reminder/subagent completion is not a successful turn.
 export class MuseEvents {
-  constructor(callbacks = {}) { this.callbacks = callbacks; this.runId = null; this.modelSeen = false; this.text = ''; this.terminal = null; this.sessionId = null; }
+  constructor(callbacks = {}, expectedModel = MODEL) { this.callbacks = callbacks; this.expectedModel = expectedModel; this.runId = null; this.modelSeen = false; this.text = ''; this.terminal = null; this.sessionId = null; }
   accept(event) {
     const p = event?.payload;
     if (!p || typeof p !== 'object') return;
     if (event.payload_type === 'run.model.configured') {
       if (this.runId && this.runId !== p.run_stream?.id) return;
-      if (p.provider_id !== 'meta' || p.model_id !== MODEL) throw failure('Muse selected an unexpected provider/model', 'MUSE_MODEL_MISMATCH', 502);
+      if (p.provider_id !== 'meta' || p.model_id !== this.expectedModel) throw failure('Muse selected an unexpected provider/model', 'MUSE_MODEL_MISMATCH', 502);
       this.runId = p.run_stream?.id;
       this.sessionId = event.stream?.id;
       this.modelSeen = true;
@@ -56,11 +57,11 @@ export class MuseEvents {
       throw failure(reason, quota ? 'MUSE_SUBSCRIPTION_LIMIT' : 'MUSE_TURN_FAILED', quota ? 429 : 502);
     }
     if (typeof this.terminal.text !== 'string' || !this.terminal.text.trim()) throw failure('Muse completed without final text', 'MUSE_EMPTY_RESPONSE', 502);
-    return { text: this.terminal.text, model: MODEL, sessionId: this.sessionId };
+    return { text: this.terminal.text, model: this.expectedModel, sessionId: this.sessionId };
   }
 }
 
-export async function runMuse(job, config, { signal, onText, onEvent, onActivity } = {}) {
+export async function runMuse(job, config, { signal, onText, onEvent, onActivity, onUsage } = {}) {
   if (!subscriptionStatus(config.authPath).ready) throw failure('Muse subscription login is required; complete muse login in a private local flow. No API-key fallback was attempted.', 'MUSE_SUBSCRIPTION_AUTH_REQUIRED', 503);
   if (signal?.aborted) throw failure('Request cancelled', 'MUSE_CANCELLED', 499);
   fs.mkdirSync(config.stateDir, { recursive: true, mode: 0o700 });
@@ -80,19 +81,21 @@ export async function runMuse(job, config, { signal, onText, onEvent, onActivity
     transport: 'stdio', command: process.execPath, args: [config.proxyPath], mode: 'required',
     env: { ...proxyEnv, OPENCLAW_MCP_ENABLED_TOOLS: job.allowedTools.join(',') },
   } } : {};
-  fs.writeFileSync(path.join(cfgDir, 'settings.json'), JSON.stringify({ schema_version: 1, provider: 'meta', model: MODEL, mcp_servers: mcp }), { mode: 0o600 });
+  fs.writeFileSync(path.join(cfgDir, 'settings.json'), JSON.stringify({ schema_version: 1, provider: 'meta', model: job.model, mcp_servers: mcp }), { mode: 0o600 });
   const promptPath = path.join(dir, 'prompt.txt');
   fs.writeFileSync(promptPath, job.prompt, { mode: 0o600 });
-  const args = ['exec', '--json', '--model', MODEL, '--reasoning-effort', job.effort,
+  const args = ['exec', '--json', '--model', job.model, '--reasoning-effort', job.effort,
     '--workspace', cwd, '--prompt-file', promptPath, '--no-foreign-personal-context',
     '--disable-write', '--disable-shell', '--disable-web-tools', '--approval-mode', 'never',
-    '--max-model-steps', String(config.maxSteps), '--no-session-log'];
+    '--max-model-steps', String(config.maxSteps)];
   for (const [index, image] of job.images.entries()) {
     const imagePath = path.join(dir, `image-${index + 1}.${image.extension}`);
     fs.writeFileSync(imagePath, image.bytes, { mode: 0o600 });
     args.push('--image', imagePath);
   }
-  const env = { ...process.env, XDG_CONFIG_HOME: path.dirname(cfgDir), MUSE_AUTH_PATH: config.authPath, ...proxyEnv };
+  const dataDir = path.join(dir, 'data');
+  fs.mkdirSync(dataDir, { mode: 0o700 });
+  const env = { ...process.env, XDG_CONFIG_HOME: path.dirname(cfgDir), XDG_DATA_HOME: dataDir, MUSE_AUTH_PATH: config.authPath, MUSE_NO_AUTO_UPDATE: '1', ...proxyEnv };
   // Subscription-only: environmental API keys must never override device login.
   delete env.META_API_KEY;
   delete env.MODEL_API_KEY;
@@ -118,7 +121,7 @@ export async function runMuse(job, config, { signal, onText, onEvent, onActivity
         // but never reinterpret a killed/incomplete request as success.
         lingerTimer = setTimeout(() => stop(failure('Muse did not exit after its terminal result', 'MUSE_EXIT_TIMEOUT', 502)), config.exitGraceMs);
         lingerTimer.unref();
-      } });
+      } }, job.model);
       const timeout = setTimeout(() => stop(failure('Muse request timed out', 'MUSE_TIMEOUT', 504)), config.timeoutMs);
       const watchdog = setInterval(() => {
         if (Date.now() - lastActivity > config.stallMs) stop(failure('Muse stream stalled', 'MUSE_STALL', 504));
@@ -132,6 +135,15 @@ export async function runMuse(job, config, { signal, onText, onEvent, onActivity
         clearTimeout(timeout); clearTimeout(killTimer); clearTimeout(lingerTimer); clearInterval(watchdog);
         signal?.removeEventListener('abort', abort);
         kill('SIGKILL'); // no orphaned MCP children after the CLI exits
+        let accounting;
+        try {
+          accounting = collectUsage(path.join(dataDir, 'muse/sessions'), { rootRunId: parser.runId, rootSessionId: parser.sessionId, expectedPromptBytes: Buffer.byteLength(job.prompt) });
+          onUsage?.(accounting);
+          if (!error && !accounting.input.verified) error = failure('Prompt exceeds the verified CLI input boundary or was compacted before inference; incomplete input was not returned as success', 'MUSE_INPUT_NOT_PRESERVED', 413);
+          if (value) value = { ...value, accounting, usage: accounting.usage ?? undefined };
+        } catch (e) {
+          if (!error) error = failure('Unable to verify Muse input/usage journal: ' + sanitizeError(e.message), 'MUSE_JOURNAL_ERROR', 502);
+        }
         error ? reject(error) : resolve(value);
       };
       const line = text => {

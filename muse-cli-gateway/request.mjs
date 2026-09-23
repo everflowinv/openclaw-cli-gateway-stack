@@ -1,14 +1,14 @@
 import fs from 'node:fs';
+import { MODEL, MODELS, EFFORTS, MAX_PROMPT_BYTES } from './catalog.mjs';
 
-export const MODEL = 'muse-spark-1.3';
-export const EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export { MODEL, EFFORTS } from './catalog.mjs';
 export function failure(message, code = 'MUSE_INVALID_REQUEST', statusCode = 400) {
   return Object.assign(new Error(message), { code, statusCode });
 }
 
-export function translateRequest(body, { maxPromptBytes = 2_000_000, maxImageBytes = 10 * 1024 ** 2, maxImages = 10, knownTools = new Set() } = {}) {
+export function translateRequest(body, { maxPromptBytes = MAX_PROMPT_BYTES, maxImageBytes = 10 * 1024 ** 2, maxImages = 10, knownTools = new Set() } = {}) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw failure('Request body must be an object');
-  if (body.model !== MODEL) throw failure(`Unknown model; available model: ${MODEL}`);
+  if (!MODELS.has(body.model)) throw failure(`Unknown model; available: ${[...MODELS.keys()].join(', ')}`);
   if (!Array.isArray(body.messages) || !body.messages.length) throw failure('messages must be a non-empty array');
   if (body.n !== undefined && body.n !== 1) throw failure('Only n=1 is supported');
   if (body.tools !== undefined && !Array.isArray(body.tools)) throw failure('tools must be an array');
@@ -71,7 +71,7 @@ export function translateRequest(body, { maxPromptBytes = 2_000_000, maxImageByt
     + (conversation.length > 1 ? `<conversation_history>\n${conversation.slice(0, -1).map(m => `${m.role}: ${escape(m.text)}`).join('\n\n')}\n</conversation_history>\n\n` : '')
     + `Latest ${latest.role} message:\n${latest.text || 'Continue.'}`;
   if (Buffer.byteLength(prompt) > maxPromptBytes) throw failure('Prompt exceeds the Muse gateway maximum input size', 'MUSE_CONTEXT_LIMIT', 413);
-  return { model: MODEL, effort, prompt, images, requesterSessionKey, allowedTools, stream: body.stream === true, includeUsage: body.stream_options?.include_usage === true };
+  return { model: body.model, effort, prompt, images, requesterSessionKey, allowedTools, stream: body.stream === true, includeUsage: body.stream_options?.include_usage === true };
 }
 
 export function readToolNames(schemaPath) {
