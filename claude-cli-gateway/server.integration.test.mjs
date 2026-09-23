@@ -74,13 +74,14 @@ if (process.argv.includes("--version")) {
 process.stdin.resume();
 process.stdin.on("end", () => {
   setTimeout(() => {
-    console.log(JSON.stringify({type:"assistant",message:{id:"msg-usage-fixture",model:"claude-opus-5-5",usage:{input_tokens:10,cache_read_input_tokens:900,output_tokens:20}}}));
+    console.log(JSON.stringify({type:"assistant",message:{id:"msg-usage-fixture",model:"claude-opus-5-5",usage:{input_tokens:10,cache_creation_input_tokens:4000,cache_read_input_tokens:900,output_tokens:2}}}));
+    console.log(JSON.stringify({type:"assistant",message:{id:"msg-usage-fixture-2",model:"claude-opus-5-5",usage:{input_tokens:5,cache_creation_input_tokens:300,cache_read_input_tokens:4900,output_tokens:18}}}));
     process.stdout.write(JSON.stringify({
       type: "result",
       subtype: "success",
       is_error: false,
       result: "ok",
-      usage: { input_tokens: "abc", cache_read_input_tokens: "900", cache_creation_input_tokens: -5, output_tokens: 20.7 },
+      usage: { input_tokens: "15", cache_read_input_tokens: "5800", cache_creation_input_tokens: 4300, output_tokens: 20.7 },
     }) + "\\n");
   }, 1800);
 });
@@ -127,13 +128,28 @@ process.stdin.on("end", () => {
     const completed = await first;
     assert.equal(completed.status, 200, JSON.stringify(completed.body));
     assert.equal(completed.body.choices[0].message.content, "ok");
-    assert.deepEqual(completed.body.usage, {prompt_tokens:900, prompt_tokens_details:{cached_tokens:900}, cache_creation_input_tokens:0, completion_tokens:20, total_tokens:920});
+    // First call's full prompt (10 + 4000 + 900), not the 2-call sum.
+    const contextUsage = {prompt_tokens:4910, prompt_tokens_details:{cached_tokens:900, cache_write_tokens:4000}, completion_tokens:20, total_tokens:4930};
+    assert.deepEqual(completed.body.usage, contextUsage);
+    const doneEvents = () => stdout.split("\n").filter((line) => line.startsWith("[CLIGW] ") && line.includes('"event":"done"')).map((line) => JSON.parse(line.slice(8)));
+    // The done line is written right after the response; allow it to flush.
+    for (let i = 0; i < 40 && doneEvents().length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+    const [done] = doneEvents();
+    // Billing totals in the log keep their shape for model-usage-cost.
+    assert.deepEqual(done.usage, {prompt_tokens:5815, prompt_tokens_details:{cached_tokens:5800}, cache_creation_input_tokens:4300, completion_tokens:20, total_tokens:10135});
+    assert.deepEqual(done.usage_reported, contextUsage);
+    assert.equal(done.lastCallUsage.prompt_tokens, 4905);
+
+    const streamed = await requestJson(port, "POST", "/v1/chat/completions", {...requestBody, stream: true, stream_options: {include_usage: true}});
+    assert.equal(streamed.status, 200);
+    const chunks = String(streamed.body).split("\n").filter((line) => line.startsWith("data: {")).map((line) => JSON.parse(line.slice(6)));
+    assert.deepEqual(chunks.find((chunk) => chunk.usage)?.usage, contextUsage);
     assert.match(stdout, /"event":"usage"/);
     assert.match(stdout, /"messageId":"msg-usage-fixture"/);
     assert.match(stdout, /"requestUuid":"[a-f0-9-]{36}"/);
     assert.match(stdout, /"event":"queued"/);
     assert.match(stdout, /"event":"queue_timeout"/);
-    process.stdout.write("claude-cli gateway integration: queue timeout ok\n");
+    process.stdout.write("claude-cli gateway integration: queue timeout and first-call context usage ok\n");
   } finally {
     child.kill("SIGTERM");
     await new Promise((resolve) => {

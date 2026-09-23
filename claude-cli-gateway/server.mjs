@@ -5,7 +5,7 @@ import os from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { normalizedClaudeUsage as normalizedUsage } from "../lib/cli-output.mjs";
+import { normalizedClaudeUsage as normalizedUsage, contextClaudeUsage } from "../lib/cli-output.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE = process.env.CLAUDE_CLI_GATEWAY_WORKSPACE
@@ -461,6 +461,9 @@ function runClaude(job, callbacks) {
     let resultEvent;
     let settled = false;
     let timedOut = false;
+    // Per-model-call usage from assistant events; result.usage is their sum.
+    let firstCallUsage = null;
+    let lastCallUsage = null;
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -507,6 +510,8 @@ function runClaude(job, callbacks) {
             callbacks.onBlockStop?.();
           }
         } else if (event.type === "assistant" && event.message?.id && event.message?.usage) {
+          firstCallUsage ??= event.message.usage;
+          lastCallUsage = event.message.usage;
           callbacks.onUsage?.(event.message);
         } else if (event.type === "result") {
           resultEvent = event;
@@ -527,7 +532,7 @@ function runClaude(job, callbacks) {
         return finish(error);
       }
       if (resultEvent && resultEvent.subtype === "success" && resultEvent.is_error !== true) {
-        return finish(null, resultEvent);
+        return finish(null, firstCallUsage ? { ...resultEvent, firstCallUsage, lastCallUsage } : resultEvent);
       }
       const detail = sanitizeError(
         resultEvent?.result
@@ -634,6 +639,9 @@ async function handleChatCompletion(req, res, body) {
       requestUuid,
       durationMs: Date.now() - startedAt,
       usage: normalizedUsage(result?.usage),
+      // What OpenClaw was told; see contextClaudeUsage.
+      usage_reported: contextClaudeUsage(result?.firstCallUsage, result?.usage),
+      ...(result?.lastCallUsage ? { lastCallUsage: normalizedUsage(result.lastCallUsage) } : {}),
       ...extra,
     });
   };
@@ -722,7 +730,7 @@ async function handleChatCompletion(req, res, body) {
         }
         sse(streamChunk(id, created, job.model, {}, "stop"));
         if (job.includeUsage) {
-          sse(streamChunk(id, created, job.model, {}, null, normalizedUsage(result.usage)));
+          sse(streamChunk(id, created, job.model, {}, null, contextClaudeUsage(result.firstCallUsage, result.usage)));
         }
         logDone(result, heartbeats ? { heartbeats } : {});
       } catch (error) {
@@ -746,7 +754,7 @@ async function handleChatCompletion(req, res, body) {
             message: { role: "assistant", content: result.result || "" },
             finish_reason: "stop",
           }],
-          usage: normalizedUsage(result.usage),
+          usage: contextClaudeUsage(result.firstCallUsage, result.usage),
         });
         logDone(result);
       } catch (error) {
