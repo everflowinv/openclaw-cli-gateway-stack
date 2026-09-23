@@ -9,7 +9,7 @@ import os from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { normalizedAgyUsage as normalizedUsage, rawAgyUsage as rawUsage, truncateText } from "../lib/cli-output.mjs";
+import { normalizedAgyUsage as normalizedUsage, rawAgyUsage as rawUsage, contextAgyUsage, truncateText } from "../lib/cli-output.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // OpenClaw workspace location; agy itself runs in the isolated AGY_CWD.
@@ -424,6 +424,9 @@ function runAgy(job, callbacks) {
     let stalled = false;
     let lastOutputAt = Date.now();
     let textOut = "";
+    // Per-model-call usage from step_update; result.usage is their sum.
+    let firstCallUsage = null;
+    let lastCallUsage = null;
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -467,7 +470,7 @@ function runAgy(job, callbacks) {
       clearInterval(stallInterval);
       if (lingerTimer) clearTimeout(lingerTimer);
       if (error) reject(error);
-      else resolve(value);
+      else resolve(firstCallUsage ? { ...value, firstCallUsage, lastCallUsage } : value);
     };
 
     child.on("error", (error) => finish(error));
@@ -494,6 +497,10 @@ function runAgy(job, callbacks) {
           callbacks.onInit?.({ ...(event.init || {}), conversationId: event.conversation_id || event.init?.conversation_id || null });
         } else if (kind === "step_update") {
           const step = event.step_update || {};
+          if (step.usage && typeof step.usage === "object") {
+            firstCallUsage ??= step.usage;
+            lastCallUsage = step.usage;
+          }
           if (step.step_type === "agent_response" && typeof step.text_delta === "string") {
             textOut += step.text_delta;
             callbacks.onText?.(step.text_delta);
@@ -671,6 +678,11 @@ async function handleChatCompletion(req, res, body) {
       durationMs: Date.now() - startedAt,
       usage: normalizedUsage(result?.usage),
       ...(result?.usage ? { usage_raw: rawUsage(result.usage) } : {}),
+      // What OpenClaw was told; see contextAgyUsage.
+      ...(result?.firstCallUsage ? {
+        usage_reported: contextAgyUsage(result.firstCallUsage, result.usage),
+        lastCallUsage: rawUsage(result.lastCallUsage),
+      } : {}),
       ...extra,
     });
   };
@@ -762,7 +774,7 @@ async function handleChatCompletion(req, res, body) {
         }
         sse(streamChunk(id, created, responseModel, {}, "stop"));
         if (job.includeUsage) {
-          sse(streamChunk(id, created, responseModel, {}, null, normalizedUsage(result.usage)));
+          sse(streamChunk(id, created, responseModel, {}, null, contextAgyUsage(result.firstCallUsage, result.usage)));
         }
         logDone(result, heartbeats ? { heartbeats } : {}, emittedText ? {} : { emptyResponse: true });
       } catch (error) {
@@ -786,7 +798,7 @@ async function handleChatCompletion(req, res, body) {
             message: { role: "assistant", content: result.response || "" },
             finish_reason: "stop",
           }],
-          usage: normalizedUsage(result.usage),
+          usage: contextAgyUsage(result.firstCallUsage, result.usage),
         });
         logDone(result, result.response ? {} : { emptyResponse: true });
       } catch (error) {

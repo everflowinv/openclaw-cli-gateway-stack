@@ -48,6 +48,22 @@ function requestJson(port, method, pathname, body) {
   });
 }
 
+function requestRaw(port, body) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body);
+    const req = http.request({
+      hostname: "127.0.0.1", port, method: "POST", path: "/v1/chat/completions",
+      headers: {"content-type": "application/json", "content-length": Buffer.byteLength(payload)},
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    });
+    req.once("error", reject);
+    req.end(payload);
+  });
+}
+
 async function waitForHealth(port) {
   const deadline = Date.now() + 5000;
   let lastError;
@@ -74,9 +90,18 @@ if (process.argv.includes("--version")) {
   process.exit(0);
 }
 fs.appendFileSync(process.env.TEST_AGY_CALLS, JSON.stringify(process.argv.slice(2)) + "\\n");
-process.stdin.resume();
+let input = "";
+process.stdin.on("data", chunk => { input += chunk; });
 process.stdin.on("end", () => {
   console.log(JSON.stringify({event:"init",conversation_id:"agy-test-conversation",init:{model:"gemini-3.8-flash"}}));
+  if (input.includes("multistep")) {
+    const step = (step_index, step_type, extra) => console.log(JSON.stringify({event:"step_update",step_update:{step_index,step_type,state:"DONE",...extra}}));
+    step(1, "agent_response", {usage:{input_tokens:13000,cache_read_tokens:81,output_tokens:40,thinking_tokens:30}});
+    step(2, "tool", {tool_info:{name:"run_command"}});
+    step(3, "agent_response", {text_delta:"done", usage:{input_tokens:2000,cache_read_tokens:20000,output_tokens:60,thinking_tokens:10}});
+    console.log(JSON.stringify({event:"result", result:{status:"SUCCESS", response:"done", usage:{input_tokens:15000,cache_read_tokens:20081,output_tokens:100,thinking_tokens:40}}}));
+    return;
+  }
   console.log(JSON.stringify({event:"step_update",step_update:{step_type:"tool",state:"ERROR",tool_info:{name:"shell",error:{error:"ENOENT",code:2}}}}));
   console.log(JSON.stringify({event:"result", result:{status:"SUCCESS", response:"ok", usage:{input_tokens:"abc",cache_read_tokens:"900",output_tokens:20.7,thinking_tokens:-5}}}));
 });
@@ -136,7 +161,20 @@ process.stdin.on("end", () => {
     assert.equal(logs.find(row=>row.event==="done").usageSchema,"agy-output-includes-thinking-v1");
     assert.deepEqual(JSON.parse(error.error), {error:"ENOENT",code:2});
     assert.equal(fs.readFileSync(calls, "utf8").trim().split("\n").length, 1);
-    console.log("antigravity gateway integration: UTF-8 limit, Chinese/emoji, streaming rejection, full history and normal request ok");
+    const contextUsage = {prompt_tokens:13081,prompt_tokens_details:{cached_tokens:81},completion_tokens:100,total_tokens:13181};
+    const multi = await send([{role:"user",content:"multistep request"}]);
+    assert.equal(multi.status, 200, JSON.stringify(multi.body));
+    assert.deepEqual(multi.body.usage, contextUsage, "context comes from the first call, not the summed run");
+    const streamed = await requestRaw(port, {model:"gemini-3.8-flash", messages:[{role:"user",content:"multistep streamed"}], stream:true, stream_options:{include_usage:true}});
+    const usageChunk = streamed.split("\n").filter(line => line.startsWith("data: {")).map(line => JSON.parse(line.slice(6))).find(chunk => chunk.usage);
+    assert.deepEqual(usageChunk?.usage, contextUsage, "streaming usage chunk matches");
+    const doneDeadline=Date.now()+2000;
+    while ((stdout.match(/"event":"done"/g) || []).length < 3 && Date.now()<doneDeadline) await new Promise(resolve=>setTimeout(resolve,10));
+    const multiDone = stdout.split("\n").filter(line => line.includes('"event":"done"')).map(line => JSON.parse(line.slice(line.indexOf("{")))).at(-1);
+    assert.equal(multiDone.usage.prompt_tokens, 35081, "log keeps the billed sum for usage accounting");
+    assert.deepEqual(multiDone.usage_reported, contextUsage);
+    assert.equal(multiDone.lastCallUsage.cache_read_tokens, 20000);
+    console.log("antigravity gateway integration: UTF-8 limit, Chinese/emoji, streaming rejection, full history, normal request and first-call context usage ok");
   } finally {
     child.kill("SIGTERM");
     await new Promise(resolve => {
