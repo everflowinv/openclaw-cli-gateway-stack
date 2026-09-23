@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>CLAUDE_CLI_GATEWAY_MAX_CONCURRENT</key>
+		<string>2</string>
+		<key>CLAUDE_CLI_GATEWAY_MODEL_ALLOWLIST</key>
+		<string>claude-opus-5-5</string>
+		<key>CLAUDE_CLI_GATEWAY_PORT</key>
+		<string>4572</string>
+		<key>CLAUDE_CLI_GATEWAY_QUEUE_TIMEOUT_SECONDS</key>
+		<string>600</string>
+		<key>CLAUDE_CLI_GATEWAY_TIMEOUT_SECONDS</key>
+		<string>3900</string>
+		<key>HOME</key>
+		<string>__HOME__</string>
+		<key>PATH</key>
+		<string>__NODE_BIN_DIR__:__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>__LABEL__</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__NODE_BIN__</string>
+		<string>__REPO__/claude-cli-gateway/server.mjs</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>__OPENCLAW_LOG_DIR__/claude-cli-gateway.stderr.log</string>
+	<key>StandardOutPath</key>
+	<string>__OPENCLAW_LOG_DIR__/claude-cli-gateway.stdout.log</string>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>WorkingDirectory</key>
+	<string>__OPENCLAW_WORKSPACE__</string>
+</dict>
+</plist>

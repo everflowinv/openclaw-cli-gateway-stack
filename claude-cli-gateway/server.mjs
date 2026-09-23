@@ -54,12 +54,18 @@ const ALLOWED_IMAGE_MIMES = new Set([
 ]);
 
 const MODELS = new Map([
-  ["claude-opus-5", { id: "claude-opus-5", created: 1784851200, input: ["text", "image"] }],
   ["claude-opus-5-5", { id: "claude-opus-5-5", created: 1790035200, input: ["text", "image"] }],
   ["claude-sonnet-5", { id: "claude-sonnet-5", created: 1784246400, input: ["text", "image"] }],
   ["claude-fable-5", { id: "claude-fable-5", created: 1784246400, input: ["text", "image"] }],
   ["claude-fable-5-1", { id: "claude-fable-5-1", created: 1788220800, input: ["text", "image"] }],
 ]);
+
+// Optional isolated model lane; used for a non-interrupting Opus 5.5 rollout.
+const MODEL_ALLOWLIST = String(process.env.CLAUDE_CLI_GATEWAY_MODEL_ALLOWLIST || "").split(",").map(s => s.trim()).filter(Boolean);
+if (MODEL_ALLOWLIST.length) {
+  for (const id of MODELS.keys()) if (!MODEL_ALLOWLIST.includes(id)) MODELS.delete(id);
+  if (!MODELS.size) throw new Error("CLAUDE_CLI_GATEWAY_MODEL_ALLOWLIST selects no known models");
+}
 
 let activeRequests = 0;
 const waiters = [];

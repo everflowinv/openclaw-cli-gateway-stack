@@ -74,7 +74,7 @@ if (process.argv.includes("--version")) {
 process.stdin.resume();
 process.stdin.on("end", () => {
   setTimeout(() => {
-    console.log(JSON.stringify({type:"assistant",message:{id:"msg-usage-fixture",model:"claude-opus-5",usage:{input_tokens:10,cache_read_input_tokens:900,output_tokens:20}}}));
+    console.log(JSON.stringify({type:"assistant",message:{id:"msg-usage-fixture",model:"claude-opus-5-5",usage:{input_tokens:10,cache_read_input_tokens:900,output_tokens:20}}}));
     process.stdout.write(JSON.stringify({
       type: "result",
       subtype: "success",
@@ -105,7 +105,7 @@ process.stdin.on("end", () => {
   child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
 
   const requestBody = {
-    model: "claude-opus-5",
+    model: "claude-opus-5-5",
     messages: [{ role: "user", content: "queue test" }],
     stream: false,
   };

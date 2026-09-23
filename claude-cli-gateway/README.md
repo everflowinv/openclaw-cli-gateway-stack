@@ -55,6 +55,8 @@ Service operations:
 
 Environment controls:
 
+- `CLAUDE_CLI_GATEWAY_MODEL_ALLOWLIST`（可选）：只开放逗号分隔的已知模型，不改变 CLI 认证。
+
 - `CLAUDE_CLI_GATEWAY_WORKSPACE` / `OPENCLAW_WORKSPACE` (default
   `~/.openclaw/workspace`) — workspace dir passed as the CLI cwd
 - `CLAUDE_CLI_GATEWAY_PORT` (default `4568`)
@@ -73,3 +75,11 @@ Environment controls:
 - `CLAUDE_CLI_GATEWAY_MAX_IMAGE_MB` (default `10` per image)
 - `CLAUDE_CLI_GATEWAY_MAX_TOTAL_IMAGE_MB` (default `20` decoded total)
 - `CLAUDE_CLI_GATEWAY_API_KEY` (optional local bearer token)
+
+## Opus 5.5 接入（2026-09-22）
+
+已验证官方 CLI 2.1.280 可使用 `claude-opus-5-5`；2.1.273 会被服务端明确拒绝。API 刊例为输入 $4、缓存读取 $0.20、5分钟缓存写入 $5、输出 $20，均为每百万 tokens；1小时缓存写入另为 $8。CLI实测模型元数据为1M context、128K max output。
+
+本机为保留原入口正在执行的任务，使用同一份server.mjs另开仅允许Opus5.5的loopback4572入口（`ai.openclaw.claude-opus55-cli-gateway`）。OpenClaw的单模型baseUrl指向4572，其余Claude模型仍用4568。两个入口使用同一官方CLI登录和同一个日志文件，看板中合并显示。默认模型不变；只将原Opus5引用替换为Opus5.5。
+
+独立入口模板：`launchd/claude-opus55-cli-gateway.plist.template`。它不是第二份代码或API凭据，也不会中断原4568上的请求。主入口后续正常维护重启时会读取最新模型目录；旧会话文本和历史测试数据保留原型号。
