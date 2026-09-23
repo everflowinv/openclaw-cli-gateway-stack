@@ -55,6 +55,7 @@ const ALLOWED_IMAGE_MIMES = new Set([
 
 const MODELS = new Map([
   ["claude-opus-5", { id: "claude-opus-5", created: 1784851200, input: ["text", "image"] }],
+  ["claude-opus-5-5", { id: "claude-opus-5-5", created: 1790035200, input: ["text", "image"] }],
   ["claude-sonnet-5", { id: "claude-sonnet-5", created: 1784246400, input: ["text", "image"] }],
   ["claude-fable-5", { id: "claude-fable-5", created: 1784246400, input: ["text", "image"] }],
   ["claude-fable-5-1", { id: "claude-fable-5-1", created: 1788220800, input: ["text", "image"] }],
