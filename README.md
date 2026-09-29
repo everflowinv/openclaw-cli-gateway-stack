@@ -131,9 +131,9 @@ Minimal OpenClaw provider registration:
   "apiKey": "dummy",
   "api": "openai-completions",
   "models": [{
-    "id": "claude-sonnet-5", "name": "claude-sonnet-5 via official Claude CLI",
-    "cost": { "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 3.75 },
-    "contextWindow": 1000000, "maxTokens": 64000,
+    "id": "claude-sonnet-5-5", "name": "claude-sonnet-5-5 via official Claude CLI",
+    "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 4 },
+    "contextWindow": 1000000, "maxTokens": 128000,
     "input": ["text", "image"], "reasoning": true
   }],
   "timeoutSeconds": 3900
