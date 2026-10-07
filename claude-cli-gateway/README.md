@@ -83,3 +83,13 @@ Environment controls:
 本机为保留原入口正在执行的任务，使用同一份server.mjs另开仅允许Opus5.5的loopback4572入口（`ai.openclaw.claude-opus55-cli-gateway`）。OpenClaw的单模型baseUrl指向4572，其余Claude模型仍用4568。两个入口使用同一官方CLI登录和同一个日志文件，看板中合并显示。默认模型不变；只将原Opus5引用替换为Opus5.5。
 
 独立入口模板：`launchd/claude-opus55-cli-gateway.plist.template`。它不是第二份代码或API凭据，也不会中断原4568上的请求。主入口后续正常维护重启时会读取最新模型目录；旧会话文本和历史测试数据保留原型号。
+
+## Haiku 5.5 接入（2026-10-07）
+
+`claude-haiku-5-5` 需要官方 CLI 2.1.293 或更新版本。2.1.286 会报 `unrecognized_model`，并把上下文按 200k 处理；2.1.293 的内置模型表为 1M 原生上下文、128K 默认输出，effort 支持 low 到 max。本机 CLI 已于当天升级到 2.1.293，4568 已重启加载新模型。
+
+API 刊例按单次请求的 prompt 长度分两档（每百万 tokens）：不超过 100,000 tokens 时，输入 $0.10、缓存读取 $0.01、1 小时缓存写入 $0.20、输出 $0.50；超过 100,000 tokens 时整单改为 $0.50、$0.05、$1、$2.50。CLI 只写 1 小时缓存，OpenClaw 的 `cacheWrite` 按 1 小时价登记，并用 `tieredPricing` 的 `[0, 100001)` 和 `[100001]` 两档表示。
+
+同日 Sonnet 5.5 的缓存读取价按官方价表更正为 $0.10（基础输入价的 5%），此前误登记为 $0.20。
+
+经网关实测，Haiku 5.5 和 Sonnet 5.5 都能处理约 961k prompt tokens 的单次请求，并找回首尾两个暗号；约 1.026M 的请求被 CLI 以 `Prompt is too long ... (limit 1000000)` 拒绝。OpenClaw 沿用 `contextTokens 950000 / contextWindow 1000000 / maxTokens 128000`。

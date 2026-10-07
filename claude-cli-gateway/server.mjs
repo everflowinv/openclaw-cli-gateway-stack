@@ -57,6 +57,7 @@ const MODELS = new Map([
   ["claude-opus-5-5", { id: "claude-opus-5-5", created: 1790035200, input: ["text", "image"] }],
   ["claude-sonnet-5-5", { id: "claude-sonnet-5-5", created: 1790553600, input: ["text", "image"] }],
   ["claude-fable-5-1", { id: "claude-fable-5-1", created: 1788220800, input: ["text", "image"] }],
+  ["claude-haiku-5-5", { id: "claude-haiku-5-5", created: 1791331200, input: ["text", "image"] }],
 ]);
 
 // Optional isolated model lane; used for a non-interrupting Opus 5.5 rollout.
