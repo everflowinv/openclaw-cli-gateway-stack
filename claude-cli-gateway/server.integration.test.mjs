@@ -1,3 +1,4 @@
+import { checkCancelledQueue } from '../lib/http-regressions.mjs';
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
@@ -71,7 +72,8 @@ if (process.argv.includes("--version")) {
   process.stdout.write("test-claude 1.0\\n");
   process.exit(0);
 }
-process.stdin.resume();
+let input="";
+process.stdin.on("data", chunk => { input += chunk; });
 process.stdin.on("end", () => {
   setTimeout(() => {
     console.log(JSON.stringify({type:"assistant",message:{id:"msg-usage-fixture",model:"claude-opus-5-5",usage:{input_tokens:10,cache_creation_input_tokens:4000,cache_read_input_tokens:900,output_tokens:2}}}));
@@ -80,10 +82,10 @@ process.stdin.on("end", () => {
       type: "result",
       subtype: "success",
       is_error: false,
-      result: "ok",
+      result: input.includes('effort-case') ? JSON.stringify({effort:process.argv[process.argv.indexOf('--effort')+1],envEffort:process.env.CLAUDE_CODE_EFFORT_LEVEL}) : "ok",
       usage: { input_tokens: "15", cache_read_input_tokens: "5800", cache_creation_input_tokens: 4300, output_tokens: 20.7 },
     }) + "\\n");
-  }, 1800);
+  }, input.includes("effort-case") ? 5 : 1800);
 });
 `, "utf8");
   fs.chmodSync(fakeClaude, 0o700);
@@ -93,7 +95,9 @@ process.stdin.on("end", () => {
     env: {
       ...process.env,
       CLAUDE_CLI_BIN: fakeClaude,
+      CLAUDE_CODE_EFFORT_LEVEL: "high",
       CLAUDE_CLI_GATEWAY_PORT: String(port),
+      CLAUDE_CLI_GATEWAY_MAX_BODY_MB: "1",
       CLAUDE_CLI_GATEWAY_MAX_CONCURRENT: "1",
       CLAUDE_CLI_GATEWAY_QUEUE_TIMEOUT_SECONDS: "1",
       CLAUDE_CLI_GATEWAY_TIMEOUT_SECONDS: "30",
@@ -149,6 +153,14 @@ process.stdin.on("end", () => {
     assert.match(stdout, /"requestUuid":"[a-f0-9-]{36}"/);
     assert.match(stdout, /"event":"queued"/);
     assert.match(stdout, /"event":"queue_timeout"/);
+    for (const [requested, expected] of [['off','low'],['none','low'],['minimal','low'],['low','low'],['medium','medium'],['high','high'],['xhigh','xhigh'],['max','max'],['ultra','max']]) {
+      const result = await requestJson(port, 'POST', '/v1/chat/completions', { ...requestBody, reasoning_effort: requested, messages:[{role:'user',content:'effort-case'}] });
+      assert.equal(result.status, 200);
+      assert.deepEqual(JSON.parse(result.body.choices[0].message.content), {effort:expected,envEffort:expected});
+    }
+    await checkCancelledQueue(port, requestBody);
+    const tooLarge = await requestJson(port, 'POST', '/v1/chat/completions', { ...requestBody, messages: [{role:'user', content:'x'.repeat(1100000)}] });
+    assert.equal(tooLarge.status, 413);
     process.stdout.write("claude-cli gateway integration: queue timeout and first-call context usage ok\n");
   } finally {
     child.kill("SIGTERM");

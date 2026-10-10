@@ -326,7 +326,7 @@
     const bg = sum(rows, r => r.background?.total_tokens);
     document.getElementById('metric-background').textContent = rows.some(r => r.coverage?.includesBackground) ? `后台已报告 ${number(bg)} tokens（已含在合计）` : '后台用量未单列';
     const isMuse = src.id.includes('muse');
-    document.getElementById('source-note').textContent = '汇总当前加载的最近请求，最多 1,000 条；不受文本筛选影响。' + (isMuse ? ' Muse 仅保留运行信息和计数，不记录正文。缺少服务端计数的调用不填零。' : ' 未提供价格或用量的请求单独留空。');
+    document.getElementById('source-note').textContent = '汇总当前加载的最近请求，最多 1,000 条；不受文本筛选影响。' + (isMuse ? ' Muse 显示运行正文和工具详情；最终回复通过完成校验后交付。缺少服务端计数的调用不填零。' : ' 未提供价格或用量的请求单独留空。');
     const models = new Map();
     for (const r of rows) {
       if (!models.has(r.model)) models.set(r.model, { count: 0, tokens: 0, context: r.context, bytes: r.bytes });
@@ -361,12 +361,17 @@
       appendThinking(src, tag, obj.text);
     } else if (obj.event === 'text' && typeof obj.text === 'string') {
       appendText(src, tag, obj.text);
+    } else if (obj.event === 'final' && typeof obj.text === 'string') {
+      appendHeader(src, tag, '已验证最终回复', false);
+      appendText(src, tag, obj.text);
+    } else if (obj.event === 'diagnostic_warning') {
+      appendHeader(src, tag, `日志详情读取失败: ${obj.message || 'unknown'}`, true);
     } else if (obj.event === 'block_stop') {
       if (st.sessions.has(tag)) closeBlock(st.sessions.get(tag));
     } else if (obj.event === 'start') {
       const session = obj.session ? ` session=${obj.session}` : '';
       const effort = obj.effort ? ` effort=${obj.effort}` : '';
-      const images = obj.images != null ? ` images=${obj.images}` : '';
+      const images = (obj.images ?? obj.imageCount) != null ? ` images=${obj.images ?? obj.imageCount}` : '';
       appendHeader(src, tag, `model=${obj.model}${effort} stream=${Boolean(obj.stream)}${images}${session}`, false);
     } else if (obj.event === 'init') {
       const init = [];

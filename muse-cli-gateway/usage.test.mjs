@@ -42,3 +42,14 @@ test('journal mirror duplicates and attribution aliases do not double count; obs
     assert.equal(collectUsage(root, { rootRunId: 'missing', expectedPromptBytes: 1000 }).input.verified, false);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('context usage uses first foreground input and foreground output, while billing counts all calls', async () => {
+  const { contextUsage } = await import('./usage.mjs');
+  const call = (scope, input, output) => ({ scope, usage: normalizeUsage({ input_tokens: input, output_tokens: output, cached_tokens: 0, reasoning_tokens: 0 }) });
+  const usage = contextUsage([call('background', 5000, 200), call('main', 1000, 30), call('main', 1100, 50)]);
+  assert.equal(usage.prompt_tokens, 1000);
+  assert.equal(usage.completion_tokens, 80);
+  assert.equal(usage.total_tokens, 1080);
+  assert.equal(contextUsage([call('background', 5000, 200)]), null);
+  assert.equal(contextUsage([{...call('main', 1100, 50), sequence: 20}, {...call('main', 1000, 30), sequence: 10}]).prompt_tokens, 1000);
+});

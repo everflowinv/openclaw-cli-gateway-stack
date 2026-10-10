@@ -1,3 +1,4 @@
+import { checkCancelledQueue } from '../lib/http-regressions.mjs';
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
@@ -92,8 +93,14 @@ if (process.argv.includes("--version")) {
 fs.appendFileSync(process.env.TEST_AGY_CALLS, JSON.stringify(process.argv.slice(2)) + "\\n");
 let input = "";
 process.stdin.on("data", chunk => { input += chunk; });
-process.stdin.on("end", () => {
+process.stdin.on("end", async () => {
+  if (input.includes("queue-delay")) await new Promise(r => setTimeout(r, 1500));
   console.log(JSON.stringify({event:"init",conversation_id:"agy-test-conversation",init:{model:"gemini-3.8-flash"}}));
+  if (input.includes("partial-failure")) {
+    console.log(JSON.stringify({event:"step_update",step_update:{step_type:"agent_response",text_delta:"unfinished diagnostic prose"}}));
+    console.log(JSON.stringify({event:"result",result:{status:"ERROR",error:"fixture interruption",response:"unfinished diagnostic prose"}}));
+    process.exitCode=3; return;
+  }
   if (input.includes("multistep")) {
     const step = (step_index, step_type, extra) => console.log(JSON.stringify({event:"step_update",step_update:{step_index,step_type,state:"DONE",...extra}}));
     step(1, "agent_response", {usage:{input_tokens:13000,cache_read_tokens:81,output_tokens:40,thinking_tokens:30}});
@@ -112,7 +119,9 @@ process.stdin.on("end", () => {
       ...process.env,
       AGY_CLI_BIN: fakeCli,
       AGY_CLI_GATEWAY_PORT: String(port),
+      AGY_CLI_GATEWAY_MAX_BODY_MB: "1",
       AGY_CLI_GATEWAY_CWD: root,
+      AGY_CLI_GATEWAY_MAX_CONCURRENT: "1",
       AGY_CLI_GATEWAY_MAX_PROMPT_BYTES: "10000",
       AGY_CLI_GATEWAY_MAX_PROMPT_CHARS: "20000",
       TEST_AGY_CALLS: calls,
@@ -174,6 +183,21 @@ process.stdin.on("end", () => {
     assert.equal(multiDone.usage.prompt_tokens, 35081, "log keeps the billed sum for usage accounting");
     assert.deepEqual(multiDone.usage_reported, contextUsage);
     assert.equal(multiDone.lastCallUsage.cache_read_tokens, 20000);
+    for (const [model, effort, expected] of [['gemini-3.8-flash','medium','medium'],['gemini-3.8-flash','xhigh','high'],['gemini-3.1-pro','medium','low'],['gemini-3.1-pro-high',undefined,'high']]) {
+      const response=await requestJson(port,'POST','/v1/chat/completions',{model,reasoning_effort:effort,messages:[{role:'user',content:'effort fixture'}]});
+      assert.equal(response.status,200);
+      const args=JSON.parse(fs.readFileSync(calls,'utf8').trim().split('\n').at(-1));
+      assert.equal(args[args.indexOf('--effort')+1],expected);
+    }
+    assert.equal((await requestJson(port,'POST','/v1/chat/completions',{model:null,messages:[{role:'user',content:'x'}]})).status,400);
+    assert.equal((await requestJson(port,'POST','/v1/chat/completions',{model:'gemini-3.8-flash',reasoning_effort:'typo',messages:[{role:'user',content:'x'}]})).status,400);
+    assert.equal((await send([{role:'user',content:'partial-failure'}])).status,502);
+    const failedStream=await requestRaw(port,{model:'gemini-3.8-flash',messages:[{role:'user',content:'partial-failure'}],stream:true});
+    assert.match(failedStream,/AGY_CLI_ERROR/);
+    assert.doesNotMatch(failedStream,/"finish_reason":"stop"/);
+    await checkCancelledQueue(port, {model:'gemini-3.8-flash', messages:[{role:'user',content:'queue-delay'}]});
+    const tooLarge = await send([{role:'user',content:'x'.repeat(1100000)}]);
+    assert.equal(tooLarge.status, 413);
     console.log("antigravity gateway integration: UTF-8 limit, Chinese/emoji, streaming rejection, full history, normal request and first-call context usage ok");
   } finally {
     child.kill("SIGTERM");

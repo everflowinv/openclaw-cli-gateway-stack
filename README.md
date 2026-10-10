@@ -46,7 +46,7 @@ the official CLIs behind a tiny local gateway means:
 | Path | What | Port |
 |---|---|---|
 | `claude-cli-gateway/` | OpenAI-compatible façade over `claude -p --stream-json`; concurrency/queue/timeout limits; watchdog heartbeats for OpenClaw's stuck-session detector | 4568 |
-| `antigravity-cli-gateway/` | Same idea over `agy` headless print mode; reasoning-effort passthrough (`reasoning_effort` → `--effort`), stall watchdog, degraded-success salvage (an interrupted stream that still carries the full text is returned, not discarded) | 4569 |
+| `antigravity-cli-gateway/` | Same idea over `agy` headless print mode; reasoning-effort passthrough (`reasoning_effort` → `--effort`), stall watchdog, verified terminal status (interrupted prose is diagnostic, not a completed reply) | 4569 |
 | `muse-cli-gateway/` | Official Muse Code device-login path for Muse Spark 1.3; per-request MCP policy, private CLI config, terminal-verified replies and cancellation | 4571 |
 | `antigravity-cli-gateway/websearch-service.mjs` + `openclaw-plugin/` | Gemini-provider-shaped web_search over agy's subscription-grounded `search_web` (minimal `excludeDefaultComponents` agent, ~5k input tokens/search); registered in OpenClaw as the `antigravity` web-search provider | 4570 |
 | `live-log-viewer/` | Python SSE server + one HTML page with a tab per gateway: per-request blocks, thinking/text, tool calls with arguments/outputs, regex + session filters, follow mode, download | 8765 |
@@ -134,9 +134,11 @@ Minimal OpenClaw provider registration:
     "id": "claude-sonnet-5-5", "name": "claude-sonnet-5-5 via official Claude CLI",
     "cost": { "input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 4 },
     "contextWindow": 1000000, "maxTokens": 128000,
-    "input": ["text", "image"], "reasoning": true
+    "input": ["text", "image"], "reasoning": true,
+    "compat": { "supportsReasoningEffort": true, "supportedReasoningEfforts": ["low", "medium", "high", "xhigh", "max"] },
+    "thinkingLevelMap": { "off": "low", "minimal": "low" }
   }],
-  "timeoutSeconds": 3900
+  "timeoutSeconds": 4620
 },
 "antigravity-cli-gateway": {
   "baseUrl": "http://127.0.0.1:4569/v1",
@@ -151,7 +153,7 @@ Minimal OpenClaw provider registration:
     "compat": { "supportsReasoningEffort": true, "supportedReasoningEfforts": ["low", "medium", "high"] },
     "thinkingLevelMap": { "off": "low", "minimal": "low", "xhigh": "high", "max": "high" }
   }],
-  "timeoutSeconds": 3900
+  "timeoutSeconds": 4620
 }
 ```
 
@@ -162,16 +164,21 @@ Then add e.g. `"antigravity-cli-gateway/gemini-3.8-flash": {}` to
 openclaw agent --model antigravity-cli-gateway/gemini-3.8-flash --message 'ping'
 ```
 
+See the [October 9 bridge review](docs/cli-bridge-review-2026-10-09.md) for runtime
+contracts, the retained AGY 1M context declaration, and verified limits.
+
 ## Validation
 
 These tests use synthetic CLI output and do not make model requests:
 
 ```bash
-node --test lib/cli-output.test.mjs
+node --test lib/*.test.mjs
 node claude-cli-gateway/server.integration.test.mjs
 node antigravity-cli-gateway/server.integration.test.mjs
-node --test muse-cli-gateway/gateway.test.mjs
+node antigravity-cli-gateway/websearch.integration.test.mjs
+node --test muse-cli-gateway/*.test.mjs
 node parsers/self-test.mjs
+python3 live-log-viewer/test_server.py
 node --test 'openclaw-mcp-proxy/'.*.test.js   # or: cd openclaw-mcp-proxy && node --test *.test.js
 ```
 

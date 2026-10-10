@@ -25,7 +25,7 @@
 //   • input-format stream-json accepts ONLY text content blocks (images are
 //     rejected) and uses {"event":"user","message":{...}} like claude.
 //   • result may be status ERROR ("The stream was interrupted...") while still
-//     carrying the complete response — check hasFullText before discarding.
+//     carrying partial prose. Only SUCCESS establishes a finished answer.
 //   • usage: input_tokens EXCLUDES cache_read_tokens;
 //     output_tokens ALREADY includes thinking_tokens (verified agy 1.2.0
 //     ModelUsageStats: output = thinking + response). Do not add it twice.
@@ -86,10 +86,11 @@ function parseLine(line, emit) {
       type: "result",
       status: result.status,
       text,
-      isError: Boolean(result.error),
+      isError: result.status !== "SUCCESS" || Boolean(result.error),
       error: result.error || null,
-      // ERROR status with non-empty text still carries the finished answer
-      hasFullText: Boolean(text && text.trim()),
+      // Text on a failed result is diagnostic, never verified completion.
+      hasFullText: result.status === "SUCCESS" && !result.error && Boolean(text && text.trim()),
+      hasText: Boolean(text && text.trim()),
       usage: normalizeUsage(result.usage),
     });
   }

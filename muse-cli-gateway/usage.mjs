@@ -17,7 +17,7 @@ export function addUsage(items) {
   for (const u of items) { raw.input_tokens += u.prompt_tokens; raw.output_tokens += u.completion_tokens; raw.cached_tokens += u.prompt_tokens_details.cached_tokens; raw.reasoning_tokens += u.completion_tokens_details.reasoning_tokens; }
   return normalizeUsage(raw);
 }
-function sessionFiles(dir) {
+export function sessionFiles(dir) {
   if (!fs.existsSync(dir)) return [];
   const found = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -53,7 +53,7 @@ export function collectUsage(sessionsRoot, { rootRunId, rootSessionId, expectedP
       const usage = normalizeUsage(event.usage);
       if (!usage) { invalidRecords++; continue; }
       const model = typeof event.model === 'string' ? event.model : null;
-      calls.push({ id: key, model, scope: foreground ? 'main' : 'background', usage, estimatedCostUsd: listPriceCost(model, usage) });
+      calls.push({ id: key, model, sequence: payload.source_run_record_sequence ?? record.sequence ?? null, scope: foreground ? 'main' : 'background', usage, estimatedCostUsd: listPriceCost(model, usage) });
     }
   }
   const usage = addUsage(calls.map(c => c.usage));
@@ -63,10 +63,23 @@ export function collectUsage(sessionsRoot, { rootRunId, rootSessionId, expectedP
   const inputVerified = Number.isSafeInteger(first?.currentUserBytes) && first.currentUserBytes >= expectedPromptBytes;
   return {
     schema: 'muse-session-reported-v1', usage, calls,
+    contextUsage: contextUsage(calls),
     main: addUsage(calls.filter(c => c.scope === 'main').map(c => c.usage)),
     background: addUsage(calls.filter(c => c.scope !== 'main').map(c => c.usage)),
     estimatedCostUsd: calls.length && calls.every(c => c.estimatedCostUsd !== null) ? calls.reduce((n, c) => n + c.estimatedCostUsd, 0) : null,
     coverage: { reportedCalls: calls.length, invalidRecords, parseErrors, includesBackground: true, basis: 'reported-completed-model-calls' },
     input: { verified: inputVerified, expectedPromptBytes, currentUserBytes: first?.currentUserBytes ?? null, totalLaneBytes: first?.totalLaneBytes ?? null },
   };
+}
+
+// OpenClaw uses prompt_tokens to size the next request's context. Repeated
+// tool-loop inputs and background observers belong only in billing totals.
+export function contextUsage(calls) {
+  const main = calls.filter(c => c.scope === 'main').sort((a, b) => (a.sequence ?? Infinity) - (b.sequence ?? Infinity)).map(c => c.usage);
+  if (!main.length) return null;
+  const first = main[0], total = addUsage(main);
+  if (!total) return null;
+  return { ...first, completion_tokens: total.completion_tokens,
+    completion_tokens_details: total.completion_tokens_details,
+    total_tokens: first.prompt_tokens + total.completion_tokens };
 }

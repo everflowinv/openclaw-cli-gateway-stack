@@ -71,10 +71,9 @@ the CLIs uniformly:
   `output_tokens` already includes `thinking_tokens` (agy 1.2.0 ModelUsageStats).
   Use `input + cache_read + output` for disjoint local token totals; do not add thinking again.
   The raw CLI `total_tokens` can omit cache reads, so it is not used as the accounting sum.
-- `result` can be `status:"ERROR"` ("The stream was interrupted...") while
-  still carrying the **complete** response text — check
-  `hasFullText` before treating it as a failure. This happens when a proxy
-  drops the long-lived model stream at its tail.
+- `result` can be `status:"ERROR"` while carrying partial prose. `hasText`
+  preserves that diagnostic; `hasFullText` requires SUCCESS without an error.
+  Non-empty prose alone does not establish that a task completed.
 - 1.1.25+ can fail to exit after the result event (linger or hang); treat
   `result` as authoritative and reap the child yourself.
 - While tools run, nothing is emitted — a long silence is normal during

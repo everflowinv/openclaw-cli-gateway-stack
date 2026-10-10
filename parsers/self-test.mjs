@@ -54,10 +54,10 @@ check("agy: usage semantics (input excludes cache_read; thinking included in out
   && aRes?.usage?.prompt_total === 14401 && aRes?.usage?.output_total === 38,
   JSON.stringify(aRes?.usage));
 
-// ---- agy interrupted-but-complete ----
+// ---- agy interrupted with unverified prose ----
 const i = run(makeAgyStreamParser, "agy-interrupted.ndjson");
 const iRes = i.find((e) => e.type === "result");
-check("agy: ERROR result still carries full text", iRes?.isError === true && iRes?.hasFullText === true
+check("agy: ERROR prose is diagnostic only", iRes?.isError === true && iRes?.hasFullText === false && iRes?.hasText === true
   && iRes?.text === "完整答案第一段。答案第二段收尾。");
 
 console.log(failures === 0 ? "self-test: OK" : `self-test: ${failures} FAILURES`);

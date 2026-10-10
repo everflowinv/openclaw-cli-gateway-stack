@@ -102,11 +102,9 @@ models in openclaw.json.
   minutes instead of waiting for the full timeout. Success also resolves on
   the `result` event (newer agy lingers or hangs after it); the child is
   reaped after a 10s grace (`linger_kill` log event).
-- **Degraded-success salvage**: when agy returns `result` with an error
-  ("The stream was interrupted") but the response text is present — or a
-  timeout/stall happens after text already streamed — the gateway returns
-  the text as a normal 200 instead of discarding a finished answer. Logged
-  as a `degraded` event (reason/chars/source) in the live log.
+- **Verified completion**: only a successful terminal result completes a turn.
+  ERROR/interrupted/timeout output remains diagnostic text and produces an error,
+  including on SSE. No successful `stop` is emitted for a failed partial answer.
 - `AGY_CLI_GATEWAY_EXEC_MAX_TIMEOUT_MS` (default `600000`, openclaw exec cap)
 - `AGY_CLI_GATEWAY_HEARTBEAT_SECONDS` (default `120`; `0` disables idle timer)
 - `AGY_CLI_GATEWAY_MAX_BODY_MB` (default `64`)

@@ -28,6 +28,9 @@ with tempfile.TemporaryDirectory(prefix='muse-dashboard-test-') as directory:
     muse=''
     for req,model,cost in [('standard','muse-spark-1.3',.001125),('contributor','muse-spark-1.3-contributor',.000071)]:
         muse += line('MUSEGW', req, 'start', model=model, effort='high',contextWindow=384000,maxPromptBytes=1400000)
+        muse += line('MUSEGW', req, 'tool', name='mcp__openclaw__read', args='{"path":"/tmp/fixture.txt"}', toolUseId='call-1')
+        muse += line('MUSEGW', req, 'tool_done', name='mcp__openclaw__read', output='MUSE_TOOL_OUTPUT_中文😀')
+        muse += line('MUSEGW', req, 'text', text='MUSE_VISIBLE_REPLY_中文😀')
         muse += line('MUSEGW', req, 'usage', usage=usage(), estimatedCostUsd=cost, coverage={'includesBackground':True}, backgroundUsage=usage(100,20,0),inputIntegrity={'verified':True})
         muse += line('MUSEGW', req, 'done', usage=usage(),estimatedCostUsd=cost,durationMs=12000)
     muse += line('MUSEGW','failed','start',model='muse-spark-1.3')+line('MUSEGW','failed','error',message='synthetic context rejection',code='MUSE_INPUT_NOT_PRESERVED')
@@ -55,6 +58,11 @@ with tempfile.TemporaryDirectory(prefix='muse-dashboard-test-') as directory:
             assert page.locator('#metric-coverage').inner_text()=='2 / 3'
             assert page.locator('#metric-running').inner_text()=='1 / 1'
             assert '384,000' in page.locator('#model-summary').inner_text()
+            visible = page.locator('.log-container.active').inner_text()
+            assert 'MUSE_VISIBLE_REPLY_中文😀' in visible
+            assert 'MUSE_TOOL_OUTPUT_中文😀' in visible
+            assert '/tmp/fixture.txt' in visible
+            assert '不记录正文' not in page.locator('#source-note').inner_text()
             page.locator('.model-pill').filter(has_text='contributor').click()
             assert 'contributor' in page.locator('#filter').input_value()
             assert page.locator('.log-container.active .item:not(.hidden)').count()>0

@@ -78,6 +78,7 @@ const selectedModel=value('--model');
 const journalDir=path.join(process.env.XDG_DATA_HOME,'muse/sessions/test/fixture-session');fs.mkdirSync(journalDir,{recursive:true});
 const journal=(id,event,run='fixture-root')=>({id,stream:{id:'fixture-session'},payload:{run_id:run,source_run_record_id:id,event}});
 const records=[journal('trace',{kind:'model_input_trace_recorded',model_step:0,scope:'full_request',bounded:{current_user_message_bytes:prompt.includes('CASE=truncated')?0:Buffer.byteLength(prompt),total_lane_bytes:Buffer.byteLength(prompt)+1000}}),journal('call1',{kind:'model_completed',model:selectedModel,usage:{input_tokens:1000,output_tokens:100,cached_tokens:800,reasoning_tokens:25}})];
+records.push(journal('tool-args',{kind:'assistant_tool_calls_committed',tool_calls:[{call_id:'test-call',name:'mcp__openclaw__read',args:'fixture-path'}]}));
 fs.writeFileSync(path.join(journalDir,'session.jsonl'),records.map(r=>JSON.stringify(r)).join('\\n')+'\\n');
 const emit=(type,p={})=>console.log(JSON.stringify({payload_type:type,stream:{id:'fixture-session'},payload:{...p,run_stream:{id:'fixture-root'}}}));
 emit('run.model.configured',{provider_id:'meta',model_id:prompt.includes('CASE=wrong')?'muse-spark-1.2':selectedModel});
@@ -88,6 +89,7 @@ else setTimeout(()=>{
     emit('run.output.delta',{text:'partial answer'});
     emit('run.terminal.failed',{terminal:'failed',reason:'fixture failure'}); process.exit(1);
   }
+  emit('tool.result',{call_id:'test-call',text:'fixture tool output',correlation_facts:{tool_name:'mcp__openclaw__read',outcome:'success'}});
   const result=JSON.stringify({text:'好😀',tools:cfg.mcp_servers.openclaw?.env.OPENCLAW_MCP_ENABLED_TOOLS??null,session:cfg.mcp_servers.openclaw?.env.OPENCLAW_REQUESTER_SESSION_KEY??null});
   const data=Buffer.from(JSON.stringify({payload_type:'run.output.delta',payload:{text:result,run_stream:{id:'fixture-root'}}})+'\\n');
   const index=data.indexOf(Buffer.from('😀'))+2;process.stdout.write(data.subarray(0,index));process.stdout.write(data.subarray(index));
@@ -100,7 +102,7 @@ else setTimeout(()=>{
   service = spawn(process.execPath, [path.join(HERE, 'server.mjs')], { env: { ...process.env,
     MUSE_CLI_BIN: cli, MUSE_CLI_GATEWAY_PORT: String(port), MUSE_CLI_GATEWAY_AUTH_PATH: path.join(root, 'auth.json'),
     MUSE_CLI_GATEWAY_STATE_DIR: path.join(root, 'state'), MUSE_CLI_GATEWAY_MAX_CONCURRENT: '1',
-    MUSE_CLI_GATEWAY_QUEUE_TIMEOUT_MS: '120', MUSE_CLI_GATEWAY_TIMEOUT_MS: '900',
+    MUSE_CLI_GATEWAY_MAX_BODY_BYTES: '4096', MUSE_CLI_GATEWAY_QUEUE_TIMEOUT_MS: '120', MUSE_CLI_GATEWAY_TIMEOUT_MS: '900',
     MUSE_CLI_GATEWAY_STALL_MS: '2000', META_API_KEY: 'test-sentinel-not-a-credential', MODEL_API_KEY: 'test-sentinel-not-a-credential',
   }, stdio: ['ignore', 'pipe', 'pipe'] });
   service.stdout.on('data', d => { logs += d; }); service.stderr.on('data', d => { logs += d; });
@@ -152,6 +154,21 @@ test('queue timeout and model timeout release slots and remove request files', a
   const timed = await request(body('CASE=hang')); assert.equal(timed.status, 504);
   assert.equal((await timed.json()).error.code, 'MUSE_TIMEOUT');
   assert.equal(fs.readdirSync(path.join(root, 'state')).length, 0);
+});
+test('content logs include live text, tool arguments and results without duplicating final text', async () => {
+  const offset = logs.length;
+  assert.equal((await request(body('CASE=ok'))).status, 200);
+  await new Promise(r => setTimeout(r, 30));
+  const events = logs.slice(offset).trim().split('\n').filter(s => s.startsWith('[MUSEGW] ')).map(s => JSON.parse(s.slice(9)));
+  assert.ok(events.some(e => e.event === 'text' && e.text.includes('好😀')));
+  assert.ok(events.some(e => e.event === 'tool' && e.args === 'fixture-path'));
+  assert.ok(events.some(e => e.event === 'tool_done' && e.output === 'fixture tool output'));
+  assert.ok(!events.some(e => e.event === 'final'));
+});
+test('oversized HTTP body returns structured 413 rather than resetting the socket', async () => {
+  const response = await request(body('x'.repeat(10000)));
+  assert.equal(response.status, 413);
+  assert.equal((await response.json()).error.code, 'MUSE_BODY_LIMIT');
 });
 test('disconnect cancels an active CLI; subscription metadata rejects API-key auth', async () => {
   const control = new AbortController(); const pending = request(body('CASE=hang'), { signal: control.signal });

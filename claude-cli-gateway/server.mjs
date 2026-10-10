@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 
 import http from "node:http";
+import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { normalizedClaudeUsage as normalizedUsage, contextClaudeUsage } from "../lib/cli-output.mjs";
+
+import { createCliVersionProbe } from "../lib/cli-version.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE = process.env.CLAUDE_CLI_GATEWAY_WORKSPACE
@@ -91,7 +94,9 @@ function numberFromEnv(name, fallback, min, max) {
   return Math.trunc(value);
 }
 
-function acquireSlot() {
+function acquireSlot(signal) {
+  const cancelled = () => Object.assign(new Error('Queued request cancelled'), { code: 'CLI_CANCELLED', statusCode: 499 });
+  if (signal?.aborted) return Promise.reject(cancelled());
   if (activeRequests < MAX_CONCURRENT) {
     activeRequests += 1;
     return Promise.resolve(releaseSlot);
@@ -103,13 +108,24 @@ function acquireSlot() {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
         activeRequests += 1;
         resolve(releaseSlot);
       },
     };
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const index = waiters.indexOf(waiter);
+      if (index !== -1) waiters.splice(index, 1);
+      signal?.removeEventListener('abort', abort);
+      reject(cancelled());
+    };
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener('abort', abort);
       const index = waiters.indexOf(waiter);
       if (index !== -1) waiters.splice(index, 1);
       const error = new Error(`Claude CLI gateway queue timed out after ${Math.round(QUEUE_TIMEOUT_MS / 1000)} seconds`);
@@ -119,6 +135,7 @@ function acquireSlot() {
     }, QUEUE_TIMEOUT_MS);
     timer.unref();
     waiters.push(waiter);
+    signal?.addEventListener('abort', abort, { once: true });
   });
 }
 
@@ -129,6 +146,7 @@ function releaseSlot() {
 }
 
 function sendJson(res, status, body) {
+  if (res.destroyed) return;
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
@@ -149,9 +167,10 @@ function requireAuth(req) {
 async function readJson(req) {
   const chunks = [];
   let total = 0;
-  for await (const chunk of req) {
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     total += chunk.length;
     if (total > MAX_BODY_BYTES) {
+      req.resume();
       const error = new Error(`Request body exceeds ${MAX_BODY_BYTES} bytes`);
       error.statusCode = 413;
       throw error;
@@ -368,16 +387,17 @@ function translateRequest(body) {
 }
 
 // claude -p accepts --effort low|medium|high|xhigh|max. OpenClaw's thinking
-// level arrives as OpenAI reasoning_effort; none/off mean "no dial" and are
-// silently ignored, anything else unknown is a hard 400.
+// level arrives as OpenAI reasoning_effort; off/minimal select the lowest supported effort: these models cannot
+// disable thinking. Unknown levels are a hard 400.
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 function resolveEffort(requested) {
   if (requested === undefined || requested === null || requested === "") return null;
   const value = String(requested).toLowerCase();
-  if (value === "none" || value === "off") return null;
+  if (["none", "off", "minimal"].includes(value)) return "low";
+  if (value === "ultra") return "max";
   if (EFFORTS.includes(value)) return value;
-  throw requestError(`Unsupported reasoning_effort '${requested}'. Available: ${EFFORTS.join(", ")} (or none/off to omit)`);
+  throw requestError(`Unsupported reasoning_effort '${requested}'. Available: ${EFFORTS.join(", ")} (off/none/minimal map to low; ultra maps to max)`);
 }
 
 function requestError(message) {
@@ -388,7 +408,7 @@ function requestError(message) {
 
 function extractRequesterSessionKey(systemPrompt) {
   const match = systemPrompt.match(/\bsession=(agent:[^\s)\]}>,;]+)/);
-  return match?.[1];
+  return match?.[1]?.replace(/[.!?。！？]+$/, "");
 }
 
 function cliEnvironment(requesterSessionKey) {
@@ -430,7 +450,7 @@ function createClaudeProcess(job) {
     : ["pipe", "pipe", "pipe"];
   const child = spawn(CLAUDE_BIN, args, {
     cwd: WORKSPACE,
-    env: cliEnvironment(job.requesterSessionKey),
+    env: { ...cliEnvironment(job.requesterSessionKey), ...(job.effort ? { CLAUDE_CODE_EFFORT_LEVEL: job.effort } : {}) },
     stdio,
   });
   // The CLI can exit before draining stdin (auth/network failure); the
@@ -457,6 +477,7 @@ function runClaude(job, callbacks) {
   return new Promise((resolve, reject) => {
     const child = createClaudeProcess(job);
     let stdoutBuffer = "";
+    const stdoutDecoder = new StringDecoder("utf8");
     let stderr = "";
     let resultEvent;
     let settled = false;
@@ -486,7 +507,7 @@ function runClaude(job, callbacks) {
       if (stderr.length > 12000) stderr = stderr.slice(-12000);
     });
     child.stdout.on("data", (chunk) => {
-      stdoutBuffer += chunk.toString("utf8");
+      stdoutBuffer += stdoutDecoder.write(chunk);
       let newline;
       while ((newline = stdoutBuffer.indexOf("\n")) !== -1) {
         const line = stdoutBuffer.slice(0, newline).trim();
@@ -582,9 +603,14 @@ async function handleChatCompletion(req, res, body) {
       timeoutMs: QUEUE_TIMEOUT_MS,
     });
   }
+  const queuedController = new AbortController();
+  const cancelQueued = () => queuedController.abort();
+  req.on('aborted', cancelQueued);
+  res.on('close', cancelQueued);
+  if (req.aborted || res.destroyed) cancelQueued();
   let release;
   try {
-    release = await acquireSlot();
+    release = await acquireSlot(queuedController.signal);
   } catch (error) {
     writeLiveLog(requestId, "queue_timeout", {
       model: job.model,
@@ -593,7 +619,11 @@ async function handleChatCompletion(req, res, body) {
       code: error?.code || "CLAUDE_CLI_QUEUE_TIMEOUT",
     });
     throw error;
+  } finally {
+    req.removeListener('aborted', cancelQueued);
+    res.removeListener('close', cancelQueued);
   }
+  if (queuedController.signal.aborted || res.destroyed) { release(); return; }
   const queuedMs = Date.now() - queuedAt;
   const startedAt = Date.now();
   let child;
@@ -764,20 +794,19 @@ async function handleChatCompletion(req, res, body) {
     }
   } finally {
     finished = true;
+    req.removeListener('aborted', cancel);
+    res.removeListener('close', cancel);
     release();
   }
 }
 
-function cliVersion() {
-  const result = spawnSync(CLAUDE_BIN, ["--version"], { encoding: "utf8", timeout: 5000 });
-  return result.status === 0 ? result.stdout.trim() : null;
-}
+const cliVersion = createCliVersionProbe(CLAUDE_BIN);
 
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || `${HOST}:${PORT}`}`);
     if (req.method === "GET" && url.pathname === "/health") {
-      const version = cliVersion();
+      const version = await cliVersion();
       return sendJson(res, version ? 200 : 503, {
         status: version ? "ok" : "degraded",
         claudeCli: version,
@@ -785,7 +814,10 @@ const server = http.createServer(async (req, res) => {
         queuedRequests: waiters.length,
         maxConcurrent: MAX_CONCURRENT,
         queueTimeoutSeconds: Math.round(QUEUE_TIMEOUT_MS / 1000),
+        timeoutSeconds: Math.round(TIMEOUT_MS / 1000),
         execMaxTimeoutMs: EXEC_MAX_TIMEOUT_MS,
+        reasoningEfforts: EFFORTS,
+        outputTokenLimitEnforced: false,
         multimodal: {
           input: ["text", "image"],
           imageMimes: [...ALLOWED_IMAGE_MIMES],

@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { failure, MODEL } from './request.mjs';
 import { collectUsage } from './usage.mjs';
+import { MuseDetails } from './details.mjs';
 
 export function subscriptionStatus(authPath) {
   try {
@@ -29,7 +30,8 @@ export class MuseEvents {
     if (event.payload_type === 'run.model.configured') {
       if (this.runId && this.runId !== p.run_stream?.id) return;
       if (p.provider_id !== 'meta' || p.model_id !== this.expectedModel) throw failure('Muse selected an unexpected provider/model', 'MUSE_MODEL_MISMATCH', 502);
-      this.runId = p.run_stream?.id;
+      if (typeof p.run_stream?.id !== 'string' || !p.run_stream.id) throw failure('Muse model record has no run identity', 'MUSE_PROTOCOL_ERROR', 502);
+      this.runId = p.run_stream.id;
       this.sessionId = event.stream?.id;
       this.modelSeen = true;
       this.callbacks.onEvent?.('model', { model: p.model_id, sessionId: this.sessionId });
@@ -40,7 +42,11 @@ export class MuseEvents {
       this.text += p.text;
       this.callbacks.onText?.(p.text);
     } else if (event.payload_type === 'tool.result') {
-      this.callbacks.onEvent?.('tool_result', { callId: p.call_id });
+      const failed = p.correlation_facts?.outcome === 'error' || p.correlation_facts?.outcome === 'failed';
+      this.callbacks.onEvent?.(failed ? 'tool_error' : 'tool_done', {
+        name: p.correlation_facts?.tool_name ?? 'unknown', toolUseId: p.call_id,
+        ...(failed ? { error: p.text } : { output: p.text }),
+      });
     } else if (event.payload_type?.startsWith('task.lifecycle.')) {
       this.callbacks.onActivity?.();
     } else if (event.payload_type?.startsWith('run.terminal.')) {
@@ -122,6 +128,17 @@ export async function runMuse(job, config, { signal, onText, onEvent, onActivity
         lingerTimer = setTimeout(() => stop(failure('Muse did not exit after its terminal result', 'MUSE_EXIT_TIMEOUT', 502)), config.exitGraceMs);
         lingerTimer.unref();
       } }, job.model);
+      const details = new MuseDetails(path.join(dataDir, 'muse/sessions'), onEvent);
+      let detailWarning = false;
+      const pollDetails = () => {
+        try { details.poll(parser.runId); }
+        catch (e) {
+          if (!detailWarning) onEvent?.('diagnostic_warning', { message: sanitizeError(e.message) });
+          detailWarning = true;
+        }
+      };
+      const detailTimer = setInterval(pollDetails, 500);
+      detailTimer.unref();
       const timeout = setTimeout(() => stop(failure('Muse request timed out', 'MUSE_TIMEOUT', 504)), config.timeoutMs);
       const watchdog = setInterval(() => {
         if (Date.now() - lastActivity > config.stallMs) stop(failure('Muse stream stalled', 'MUSE_STALL', 504));
@@ -132,6 +149,7 @@ export async function runMuse(job, config, { signal, onText, onEvent, onActivity
       const finish = (error, value) => {
         if (settled) return;
         settled = true;
+        clearInterval(detailTimer); pollDetails();
         clearTimeout(timeout); clearTimeout(killTimer); clearTimeout(lingerTimer); clearInterval(watchdog);
         signal?.removeEventListener('abort', abort);
         kill('SIGKILL'); // no orphaned MCP children after the CLI exits
@@ -140,7 +158,7 @@ export async function runMuse(job, config, { signal, onText, onEvent, onActivity
           accounting = collectUsage(path.join(dataDir, 'muse/sessions'), { rootRunId: parser.runId, rootSessionId: parser.sessionId, expectedPromptBytes: Buffer.byteLength(job.prompt) });
           onUsage?.(accounting);
           if (!error && !accounting.input.verified) error = failure('Prompt exceeds the verified CLI input boundary or was compacted before inference; incomplete input was not returned as success', 'MUSE_INPUT_NOT_PRESERVED', 413);
-          if (value) value = { ...value, accounting, usage: accounting.usage ?? undefined };
+          if (value) value = { ...value, accounting, usage: accounting.contextUsage ?? undefined };
         } catch (e) {
           if (!error) error = failure('Unable to verify Muse input/usage journal: ' + sanitizeError(e.message), 'MUSE_JOURNAL_ERROR', 502);
         }
@@ -148,10 +166,11 @@ export async function runMuse(job, config, { signal, onText, onEvent, onActivity
       };
       const line = text => {
         if (!text.trim()) return;
-        try { parser.accept(JSON.parse(text)); }
+        try { const event = JSON.parse(text); if (event?.payload_type === 'tool.result') pollDetails(); parser.accept(event); }
         catch (e) { stop(e.code ? e : failure('Invalid Muse JSONL output', 'MUSE_PROTOCOL_ERROR', 502)); }
       };
       child.stdout.on('data', chunk => {
+        if (terminalError) return;
         lastActivity = Date.now(); buffer += decoder.write(chunk);
         if (buffer.length > 16 * 1024 ** 2) return stop(failure('Muse output record exceeds limit', 'MUSE_OUTPUT_LIMIT', 502));
         let i;

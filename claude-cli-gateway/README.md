@@ -93,3 +93,17 @@ API 刊例按单次请求的 prompt 长度分两档（每百万 tokens）：不�
 同日 Sonnet 5.5 的缓存读取价按官方价表更正为 $0.10（基础输入价的 5%），此前误登记为 $0.20。
 
 经网关实测，Haiku 5.5 和 Sonnet 5.5 都能处理约 961k prompt tokens 的单次请求，并找回首尾两个暗号；约 1.026M 的请求被 CLI 以 `Prompt is too long ... (limit 1000000)` 拒绝。OpenClaw 沿用 `contextTokens 950000 / contextWindow 1000000 / maxTokens 128000`。
+
+## Bridge contract review (2026-10-09)
+
+All four advertised Claude models support low/medium/high/xhigh/max. Explicitly
+set `compat.supportsReasoningEffort` and `compat.supportedReasoningEfforts` in
+OpenClaw for every model on this custom endpoint; otherwise OpenClaw can omit
+the requested effort entirely. `off`/`none`/`minimal` map to `low` because these
+models cannot disable reasoning; `ultra` maps to `max`. An explicit request also
+sets the child process effort environment so inherited settings cannot override it.
+
+`max_tokens`/`max_completion_tokens` are not exact native CLI output limits.
+`/health` reports `outputTokenLimitEnforced: false`. Size the outer provider
+request deadline above the gateway queue plus execution timeout; Dalton's
+separate 600-second budget is an intentional earlier cancellation boundary.

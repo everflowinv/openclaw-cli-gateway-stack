@@ -4,12 +4,15 @@
 // (text-only input, step-granularity streaming, per-model effort suffixes).
 
 import http from "node:http";
+import { StringDecoder } from "node:string_decoder";
 import fs from "node:fs";
 import os from "node:os";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { normalizedAgyUsage as normalizedUsage, rawAgyUsage as rawUsage, contextAgyUsage, truncateText } from "../lib/cli-output.mjs";
+
+import { createCliVersionProbe } from "../lib/cli-version.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // OpenClaw workspace location; agy itself runs in the isolated AGY_CWD.
@@ -75,6 +78,7 @@ const EFFORTS = ["low", "medium", "high"];
 const DEFAULT_EFFORT = process.env.AGY_CLI_GATEWAY_DEFAULT_EFFORT || "low";
 
 function resolveModelId(requested) {
+  if (typeof requested !== 'string') return null;
   if (MODELS.has(requested)) return { base: requested, suffixEffort: null };
   for (const effort of EFFORTS) {
     if (requested.endsWith(`-${effort}`)) {
@@ -87,9 +91,10 @@ function resolveModelId(requested) {
 
 // OpenClaw levels beyond agy's three clamp upward (xhigh/max -> high) or
 // downward to the cheapest real effort (none/minimal/off -> low); missing or
-// unrecognized values fall back to the pinned suffix or DEFAULT_EFFORT.
+// absent values fall back to the pinned suffix or DEFAULT_EFFORT; unknowns fail.
 function mapEffort(requested, fallbackEffort, modelMeta) {
-  const value = typeof requested === "string" ? requested.toLowerCase() : "";
+  const value = requested == null || requested === "" ? (fallbackEffort || DEFAULT_EFFORT) : String(requested).toLowerCase();
+  if (![...EFFORTS, "none", "minimal", "off", "xhigh", "max", "ultra"].includes(value)) throw requestError(`Unsupported reasoning_effort '${requested}'`);
   if (modelMeta?.agyModel === "gemini-3.1-pro") {
     if (value === "high" || value === "xhigh" || value === "max" || value === "ultra") return "high";
     return "low";
@@ -124,7 +129,9 @@ function numberFromEnv(name, fallback, min, max) {
   return Math.trunc(value);
 }
 
-function acquireSlot() {
+function acquireSlot(signal) {
+  const cancelled = () => Object.assign(new Error('Queued request cancelled'), { code: 'CLI_CANCELLED', statusCode: 499 });
+  if (signal?.aborted) return Promise.reject(cancelled());
   if (activeRequests < MAX_CONCURRENT) {
     activeRequests += 1;
     return Promise.resolve(releaseSlot);
@@ -136,13 +143,24 @@ function acquireSlot() {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
         activeRequests += 1;
         resolve(releaseSlot);
       },
     };
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const index = waiters.indexOf(waiter);
+      if (index !== -1) waiters.splice(index, 1);
+      signal?.removeEventListener('abort', abort);
+      reject(cancelled());
+    };
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener('abort', abort);
       const index = waiters.indexOf(waiter);
       if (index !== -1) waiters.splice(index, 1);
       const error = new Error(`Antigravity CLI gateway queue timed out after ${Math.round(QUEUE_TIMEOUT_MS / 1000)} seconds`);
@@ -152,6 +170,7 @@ function acquireSlot() {
     }, QUEUE_TIMEOUT_MS);
     timer.unref();
     waiters.push(waiter);
+    signal?.addEventListener('abort', abort, { once: true });
   });
 }
 
@@ -162,6 +181,7 @@ function releaseSlot() {
 }
 
 function sendJson(res, status, body) {
+  if (res.destroyed) return;
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
@@ -182,9 +202,10 @@ function requireAuth(req) {
 async function readJson(req) {
   const chunks = [];
   let total = 0;
-  for await (const chunk of req) {
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     total += chunk.length;
     if (total > MAX_BODY_BYTES) {
+      req.resume();
       const error = new Error(`Request body exceeds ${MAX_BODY_BYTES} bytes`);
       error.statusCode = 413;
       throw error;
@@ -322,7 +343,7 @@ function translateRequest(body) {
     effort: mapEffort(body.reasoning_effort ?? body.reasoning?.effort, resolvedModel.suffixEffort, modelMeta),
     requestedEffort: body.reasoning_effort ?? body.reasoning?.effort ?? null,
     prompt,
-    requesterSessionKey: extractRequesterSessionKey(prompt),
+    requesterSessionKey: extractRequesterSessionKey(systemParts.join("\n\n")),
     stream: body.stream === true,
     includeUsage: body.stream_options?.include_usage === true,
   };
@@ -336,7 +357,7 @@ function requestError(message, statusCode = 400) {
 
 function extractRequesterSessionKey(prompt) {
   const match = prompt.match(/\bsession=(agent:[^\s)\]}>,;]+)/);
-  return match?.[1];
+  return match?.[1]?.replace(/[.!?。！？]+$/, "");
 }
 
 function cliEnvironment(requesterSessionKey) {
@@ -417,6 +438,7 @@ function runAgy(job, callbacks) {
   return new Promise((resolve, reject) => {
     const child = createAgyProcess(job);
     let stdoutBuffer = "";
+    const stdoutDecoder = new StringDecoder("utf8");
     let stderr = "";
     let resultEvent;
     let settled = false;
@@ -480,7 +502,7 @@ function runAgy(job, callbacks) {
     });
     child.stdout.on("data", (chunk) => {
       lastOutputAt = Date.now();
-      stdoutBuffer += chunk.toString("utf8");
+      stdoutBuffer += stdoutDecoder.write(chunk);
       let newline;
       while ((newline = stdoutBuffer.indexOf("\n")) !== -1) {
         const line = stdoutBuffer.slice(0, newline).trim();
@@ -497,7 +519,7 @@ function runAgy(job, callbacks) {
           callbacks.onInit?.({ ...(event.init || {}), conversationId: event.conversation_id || event.init?.conversation_id || null });
         } else if (kind === "step_update") {
           const step = event.step_update || {};
-          if (step.usage && typeof step.usage === "object") {
+          if (step.step_type === "agent_response" && step.usage && typeof step.usage === "object") {
             firstCallUsage ??= step.usage;
             lastCallUsage = step.usage;
           }
@@ -516,16 +538,11 @@ function runAgy(job, callbacks) {
           if (resultEvent.status === "SUCCESS" && !resultEvent.error) {
             finish(null, resultEvent);
             reapChild();
-          } else if (typeof resultEvent.response === "string" && resultEvent.response.trim()) {
-            // agy can report ERROR ("The stream was interrupted") while still
-            // delivering the complete response text — a network blip at the
-            // stream tail must not discard a finished answer.
-            callbacks.onDegraded?.({ reason: resultEvent.error || "error-with-response", chars: resultEvent.response.length, source: "result.response" });
-            finish(null, { ...resultEvent, status: "SUCCESS", error: null });
-            reapChild();
-          } else if (textOut.trim()) {
-            callbacks.onDegraded?.({ reason: resultEvent.error || "error-with-text", chars: textOut.length, source: "streamed-text" });
-            finish(null, { status: "SUCCESS", error: null, response: textOut, usage: resultEvent.usage });
+          } else {
+            const error = new Error(sanitizeError(resultEvent.error) || `agy result status: ${resultEvent.status || 'missing'}`);
+            error.code = 'AGY_CLI_ERROR';
+            error.resultEvent = resultEvent;
+            finish(error);
             reapChild();
           }
         }
@@ -533,13 +550,6 @@ function runAgy(job, callbacks) {
     });
     child.on("close", (code, signal) => {
       if (timedOut || stalled) {
-        // Timeout/stall after a hang: if the answer text already streamed
-        // (the post-completion hang variant), salvage it instead of
-        // discarding minutes of finished work.
-        if (textOut.trim()) {
-          callbacks.onDegraded?.({ reason: timedOut ? "timeout-with-text" : "stall-with-text", chars: textOut.length, source: "streamed-text" });
-          return finish(null, { status: "SUCCESS", response: textOut });
-        }
         if (timedOut) {
           const error = new Error(`Antigravity CLI timed out after ${Math.round(TIMEOUT_MS / 1000)} seconds`);
           error.code = "AGY_CLI_TIMEOUT";
@@ -604,9 +614,14 @@ async function handleChatCompletion(req, res, body) {
       timeoutMs: QUEUE_TIMEOUT_MS,
     });
   }
+  const queuedController = new AbortController();
+  const cancelQueued = () => queuedController.abort();
+  req.on('aborted', cancelQueued);
+  res.on('close', cancelQueued);
+  if (req.aborted || res.destroyed) cancelQueued();
   let release;
   try {
-    release = await acquireSlot();
+    release = await acquireSlot(queuedController.signal);
   } catch (error) {
     writeLiveLog(requestId, "queue_timeout", {
       model: job.model,
@@ -615,7 +630,11 @@ async function handleChatCompletion(req, res, body) {
       code: error?.code || "AGY_CLI_QUEUE_TIMEOUT",
     });
     throw error;
+  } finally {
+    req.removeListener('aborted', cancelQueued);
+    res.removeListener('close', cancelQueued);
   }
+  if (queuedController.signal.aborted || res.destroyed) { release(); return; }
   const queuedMs = Date.now() - queuedAt;
   const startedAt = Date.now();
   let child;
@@ -666,7 +685,6 @@ async function handleChatCompletion(req, res, body) {
       status: result?.status || null,
       responseChars: typeof result?.response === "string" ? result.response.length : null,
     }),
-    onDegraded: (info) => writeLiveLog(requestId, "degraded", info),
     onLingerKill: () => writeLiveLog(requestId, "linger_kill", {}),
   };
 
@@ -808,14 +826,13 @@ async function handleChatCompletion(req, res, body) {
     }
   } finally {
     finished = true;
+    req.removeListener('aborted', cancel);
+    res.removeListener('close', cancel);
     release();
   }
 }
 
-function cliVersion() {
-  const result = spawnSync(AGY_BIN, ["--version"], { encoding: "utf8", timeout: 15000 });
-  return result.status === 0 ? result.stdout.trim() : null;
-}
+const cliVersion = createCliVersionProbe(AGY_BIN);
 
 fs.mkdirSync(AGY_CWD, { recursive: true });
 
@@ -823,7 +840,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || `${HOST}:${PORT}`}`);
     if (req.method === "GET" && url.pathname === "/health") {
-      const version = cliVersion();
+      const version = await cliVersion();
       return sendJson(res, version ? 200 : 503, {
         status: version ? "ok" : "degraded",
         agyCli: version,
@@ -831,8 +848,11 @@ const server = http.createServer(async (req, res) => {
         queuedRequests: waiters.length,
         maxConcurrent: MAX_CONCURRENT,
         queueTimeoutSeconds: Math.round(QUEUE_TIMEOUT_MS / 1000),
+        timeoutSeconds: Math.round(TIMEOUT_MS / 1000),
         execMaxTimeoutMs: EXEC_MAX_TIMEOUT_MS,
         maxPromptBytes: MAX_PROMPT_BYTES,
+        reasoningEfforts: EFFORTS,
+        outputTokenLimitEnforced: false,
         multimodal: { input: ["text"] },
       });
     }

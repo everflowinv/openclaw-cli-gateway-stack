@@ -19,7 +19,9 @@
 // Everything binds to 127.0.0.1 only. Node ≥ 20, no dependencies.
 
 import { createServer } from "node:http";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
+import { createCliVersionProbe } from "../lib/cli-version.mjs";
 import { randomBytes, createHash } from "node:crypto";
 import { mkdirSync, copyFileSync, existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -297,6 +299,7 @@ function runAgySearch(translatedQuery) {
     })}\n`);
 
     let buffer = "";
+    const decoder = new StringDecoder("utf8");
     let stderrTail = "";
     let sawAgent = false;
     let searchCalls = 0;
@@ -318,9 +321,10 @@ function runAgySearch(translatedQuery) {
       else resolve(payload);
     }
 
+    child.on("error", error => finish(error));
     child.stdout.on("data", (chunk) => {
       lastActivity = Date.now();
-      buffer += chunk.toString("utf8");
+      buffer += decoder.write(chunk);
       let newline;
       while ((newline = buffer.indexOf("\n")) !== -1) {
         const line = buffer.slice(0, newline).trim();
@@ -357,7 +361,7 @@ function runAgySearch(translatedQuery) {
         finish(new Error(`AGY_SEARCH_ERROR: agy exited without a result${detail}: ${truncateText(stderrTail.trim(), 300)}`));
         return;
       }
-      if (result.status !== "SUCCESS") {
+      if (result.status !== "SUCCESS" || result.error) {
         finish(new Error(`AGY_SEARCH_ERROR: result status ${result.status}: ${truncateText(result.response, 300)}`));
         return;
       }
@@ -584,13 +588,7 @@ function sendJson(response, statusCode, payload) {
   response.end(body);
 }
 
-function agyVersion() {
-  try {
-    return spawnSync(AGY_BIN, ["--version"], { encoding: "utf8", timeout: 15000 }).stdout?.trim() || null;
-  } catch {
-    return null;
-  }
-}
+const agyVersion = createCliVersionProbe(AGY_BIN);
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${HOST}:${PORT}`);
@@ -599,9 +597,10 @@ const server = createServer(async (request, response) => {
     return;
   }
   if (request.method === "GET" && url.pathname === "/health") {
-    sendJson(response, 200, {
-      status: "ok",
-      agyCli: agyVersion(),
+    const version = await agyVersion();
+    sendJson(response, version ? 200 : 503, {
+      status: version ? "ok" : "degraded",
+      agyCli: version,
       agent: AGENT_NAME,
       agentInstalled: existsSync(AGENT_INSTALL_PATH),
       model: MODEL,

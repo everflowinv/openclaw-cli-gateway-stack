@@ -74,6 +74,9 @@ def broadcast(source: Source, line: str):
         for q, done in source.subscribers:
             if done.is_set():
                 dead.append((q, done))
+            elif len(q) >= HISTORY_MAX:
+                done.set()  # slow clients reconnect and replay bounded history
+                dead.append((q, done))
             else:
                 q.append(item)
         for d in dead:
@@ -90,7 +93,7 @@ def tail_file(path: Path, n: int = 500) -> list:
             f.seek(max(0, size - chunk))
             data = f.read().decode('utf-8', errors='replace')
         lines = data.splitlines()
-        return lines[-n:]
+        return lines[-n:] if n > 0 else []
     except (FileNotFoundError, OSError):
         return []
 
@@ -114,19 +117,31 @@ def watch_file(source: Source):
     first_open = True
     last_ino = None
     last_pos = 0
+    pending = b''
     while True:
         if f is None:
             try:
-                f = open(log_file, 'r', encoding='utf-8', errors='replace')
+                f = open(log_file, 'rb')
                 st = os.fstat(f.fileno())
                 if first_open:
-                    f.seek(0, 2)
-                elif st.st_ino == last_ino:
-                    f.seek(min(last_pos, st.st_size))
+                    # Prime and follow using one descriptor: no startup gap.
+                    offset = max(0, st.st_size - 1024 * 1024)
+                    f.seek(offset)
+                    if offset:
+                        f.readline()  # discard a potentially partial record
+                    records = f.read().split(b'\n')
+                    pending = records.pop()
+                    for record in records[-1000:]:
+                        broadcast(source, record.decode('utf-8', errors='replace'))
+                elif st.st_ino == last_ino and st.st_size >= last_pos:
+                    f.seek(last_pos)
+                else:
+                    pending = b''
+                last_pos = f.tell()
                 first_open = False
                 last_ino = st.st_ino
             except OSError:
-                f = None
+                f = close_quiet(f)
                 time.sleep(1)
                 continue
         try:
@@ -137,7 +152,10 @@ def watch_file(source: Source):
             time.sleep(0.5)
             continue
         if line:
-            broadcast(source, line.rstrip('\n'))
+            pending += line
+            if pending.endswith(b'\n'):
+                broadcast(source, pending[:-1].decode('utf-8', errors='replace'))
+                pending = b''
             continue
         # idle: detect rotation (inode changed) or in-place truncation
         try:
@@ -148,6 +166,7 @@ def watch_file(source: Source):
             if st.st_size < f.tell():
                 f.seek(0)
                 last_pos = 0
+                pending = b''
                 continue
         except (OSError, ValueError):
             f = close_quiet(f)
@@ -165,11 +184,6 @@ def watcher_supervisor(source: Source):
             traceback.print_exc()
             time.sleep(1)
 
-
-# Prime history so first-connect clients get a backlog without /tail.
-for _source in SOURCES:
-    for _line in tail_file(_source.path, n=1000):
-        broadcast(_source, _line)
 
 for _source in SOURCES:
     threading.Thread(target=watcher_supervisor, args=(_source,), daemon=True).start()
@@ -208,7 +222,13 @@ class Handler(BaseHTTPRequestHandler):
         elif path == '/sources':
             self.serve_sources()
         elif path == '/tail':
-            n = int(qs.get('n', ['500'])[0])
+            try:
+                n = int(qs.get('n', ['500'])[0])
+                if not 0 <= n <= HISTORY_MAX:
+                    raise ValueError
+            except ValueError:
+                self.send_error(400, f'n must be an integer between 0 and {HISTORY_MAX}')
+                return
             self.serve_tail(source, n)
         elif path == '/stream':
             self.serve_stream(source, parsed)
@@ -263,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('X-Accel-Buffering', 'no')
         self.end_headers()
 
-        queue = []
+        queue = deque()
         done = threading.Event()
         with state_lock:
             # A server restart resets seq counting; a client resuming with a
@@ -284,10 +304,11 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
 
             last_ping = time.time()
-            while True:
-                if queue:
-                    batch = queue.copy()
+            while not done.is_set():
+                with state_lock:
+                    batch = list(queue)
                     queue.clear()
+                if batch:
                     for s, line in batch:
                         self.wfile.write(f"id: {s}\ndata: {line}\n\n".encode('utf-8'))
                     self.wfile.flush()
@@ -301,7 +322,10 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
-            done.set()
+            with state_lock:
+                done.set()
+                if (queue, done) in source.subscribers:
+                    source.subscribers.remove((queue, done))
 
 
 if __name__ == '__main__':
