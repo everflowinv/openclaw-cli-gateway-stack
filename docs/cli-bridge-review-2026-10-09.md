@@ -169,3 +169,9 @@ used `openclaw gateway restart --safe` after its preflight reported zero active
 work across all categories. The old host also reported cleanup errors during
 shutdown and wrote its own stability bundle before launchd started a new host.
 This review does not claim to fix that upstream plugin lifecycle defect.
+
+Recovery was verified: the new OpenClaw host returned healthy, the restored
+Dalton socket accepted an authenticated replay-only request, and a real Dalton
+→ OpenClaw → Muse 1.4.4 completion returned the exact synthetic marker. The
+production gateway recorded the expected `minimal` effort for this profile's
+unspecified thinking level and a successful terminal result in 20.8 seconds.
