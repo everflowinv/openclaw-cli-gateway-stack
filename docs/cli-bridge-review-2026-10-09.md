@@ -151,3 +151,21 @@ specific versions and payloads, not every possible conversation or tool loop.
 
 Local runtime/model-catalog evidence takes precedence over broader API capability
 claims when defining this CLI bridge's safe behavior.
+
+## Deployment observations
+
+The changes were fast-forwarded into the runtime checkout. Each CLI service
+(including the dedicated Opus listener) and the log viewer was restarted only
+when its active/queued count was zero. A production Muse 1.4.4 MCP read then
+returned the fixture marker; its log contained `tool`, `tool_done`, `text`,
+`usage` and `done`, and real Chrome rendering confirmed both arguments and output.
+The deployed OpenClaw configuration passed the same 64-case serialization
+matrix. Every model context window and all global agent defaults were compared
+with the backup and remained unchanged.
+
+OpenClaw 2026.9.9 hot reload encountered a separate plugin lifecycle problem:
+resource cleanup timed out and left the Dalton model broker stopped. Recovery
+used `openclaw gateway restart --safe` after its preflight reported zero active
+work across all categories. The old host also reported cleanup errors during
+shutdown and wrote its own stability bundle before launchd started a new host.
+This review does not claim to fix that upstream plugin lifecycle defect.
