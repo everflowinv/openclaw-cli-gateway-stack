@@ -58,9 +58,10 @@ export function translateRequest(body, { maxPromptBytes = MAX_PROMPT_BYTES, maxI
       let name = entry?.function?.name ?? entry?.name;
       if (typeof name !== 'string') continue;
       name = name.replace(/^mcp__openclaw__/, '').replace(/^openclaw__/, '');
+      name = name.replace(/^mcp__(gridcraft|wordcraft|pdfcraft)__/, '$1__');
       // These two upstream catalogs are attached dynamically by the existing
       // proxy; Firecrawl remains restricted to its proxy-owned scrape route.
-      const upstream = /^(guidepoint|alphaengine)__[A-Za-z0-9_]+$/.test(name) || name === 'firecrawl__firecrawl_scrape';
+      const upstream = /^(guidepoint|alphaengine|gridcraft|wordcraft|pdfcraft)__[A-Za-z0-9_]+$/.test(name) || name === 'firecrawl__firecrawl_scrape';
       if ((knownTools.has(name) || upstream) && !allowedTools.includes(name)) allowedTools.push(name);
     }
   }

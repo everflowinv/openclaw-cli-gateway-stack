@@ -21,6 +21,7 @@ const { execFile: nodeExecFile, spawn: nodeSpawn } = require("child_process");
 const { createPendingYieldStore } = require("./pending-yield-store");
 const { waitForYieldContinuation } = require("./direct-agent-continuation");
 const { readSqliteAssistantTexts, selectRunAssistantTexts } = require("./session-reply-store");
+const { createCraftBridge } = require("./craft-stdio.cjs");
 
 const OPENCLAW_HOME = process.env.OPENCLAW_HOME
   || fspath.join(require("node:os").homedir(), ".openclaw");
@@ -588,6 +589,15 @@ async function upstreamMcpRpc(upstream, method, params, timeoutMs) {
 }
 
 const upstreamToolRoutes = new Map(); // prefixed name -> { upstream, bareName }
+const craftBridge = createCraftBridge({
+  openclawHome: OPENCLAW_HOME,
+  disabled: DYNAMIC_SESSIONS_ENABLED,
+  allowlist: CONFIGURED_TOOL_ALLOWLIST,
+  isToolAllowed,
+});
+const craftToolsReady = craftBridge.ready.then(() => {
+  for (const tool of craftBridge.tools) if (!TOOLS.some(t => t.name === tool.name)) TOOLS.push(tool);
+});
 const upstreamToolsReady = (async () => {
   for (const upstream of UPSTREAM_MCP) {
     try {
@@ -1728,6 +1738,7 @@ async function handleRequest(msg) {
 
   if (method === "tools/list") {
     await upstreamToolsReady.catch(() => {});
+    await craftToolsReady;
     return reply(id, { tools: TOOLS });
   }
 
@@ -1738,8 +1749,11 @@ async function handleRequest(msg) {
       return replyError(id, -32601, "Tool is disabled by the server-side allowlist: " + name);
     }
     await upstreamToolsReady.catch(() => {});
+    await craftToolsReady;
 
     try {
+      // Preserve structuredContent, images and isError without stringifying them.
+      if (craftBridge.has(name)) return reply(id, await craftBridge.call(name, args));
       let result;
       if (name === "sessions_send" && DYNAMIC_SESSIONS_ENABLED) {
         // Eve Desktop chats are direct Gateway agent turns. Routing them through
@@ -1868,6 +1882,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 process.on("exit", (code) => {
+  craftBridge.close();
   for (const [, proc] of bgSessions) {
     if (proc.runtimeTimer) clearTimeout(proc.runtimeTimer);
     signalProcessTree(proc.child, "SIGTERM");
