@@ -207,10 +207,14 @@ bash skills/model-usage-cost/scripts/run.sh summary
 The usage skill reports local coverage separately from token totals and current
 catalog cost estimates. It persists sanitized observations and keeps unresolved
 overlapping aggregates outside totals. See [the accounting repair](docs/usage-accounting-repair-2026-09-10.md).
-`launchd/model-usage-collector.py` optionally harvests the bounded Dalton broker
-journal every 60 seconds; it expects the main Workshop skill installation and
-writes one atomic status JSON. It invokes no model. Local account data, session
-files and evidence databases are not included in this repository.
+`launchd/model-usage-collector.py` harvests recent Dalton, Antigravity, Claude
+gateway and Muse evidence every 60 seconds, using `collect-broker --days 2`.
+It expects the main Workshop skill installation and writes one atomic status
+JSON. It invokes no model. The local LaunchAgent uses `ProcessType=Standard`,
+normal disk I/O priority and `Nice=10`: background I/O throttling caused scans
+of the external-volume Dalton database to exceed the 50-second deadline.
+Local account data, session files and evidence databases are not included in
+this repository.
 
 ## License
 

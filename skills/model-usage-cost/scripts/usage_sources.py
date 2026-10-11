@@ -25,9 +25,13 @@ ROOTS = {
  'trajectory-file': ['~/.openclaw/agents/*/sessions/*.trajectory.jsonl', '~/.openclaw/agents/*/session-sqlite-import-archive/*.trajectory.jsonl.imported-*'],
  'claude-gateway': ['~/.openclaw/logs/claude-cli-gateway.stdout.log*'],
  'agy-gateway': ['~/.openclaw/logs/antigravity-cli-gateway.stdout.log*'],
+ 'muse-sessions': ['~/.local/share/muse/sessions/**/session.jsonl'],
+ 'muse-gateway': ['~/.openclaw/logs/muse-cli-gateway.stdout.log*'],
  'agy-db': ['~/.gemini/antigravity-cli/conversations/*.db'],
  'dalton-db': ['~/Library/Application Support/Dalton/state/dalton-core/core.sqlite'],
  'broker': ['~/.openclaw/dalton-model-broker.sock.journal.json'],
+ 'zcode-db': ['~/.zcode/cli/db/db.sqlite'],
+ 'zcode-rollout': ['~/.zcode/cli/rollout/model-io-*.jsonl'],
 }
 
 
@@ -61,9 +65,20 @@ def digest(*values):
 
 
 def dbopen(path):
-    c = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True)
-    c.execute('PRAGMA query_only=ON')
-    return c
+    if not Path(path).is_file(): raise FileNotFoundError(path)
+    uri = Path(path).resolve().as_uri()
+    try:
+        c = sqlite3.connect(uri + '?mode=ro', uri=True)
+        c.execute('PRAGMA query_only=ON')
+        return c
+    except sqlite3.OperationalError as error:
+        # A cleanly closed WAL database (no -wal/-shm sidecars) cannot be opened read-only.
+        # Without a -wal file, immutable mode sees the complete committed content and creates no files.
+        if 'unable to open database file' not in str(error) or os.path.exists(str(path) + '-wal'):
+            raise
+        c = sqlite3.connect(uri + '?immutable=1', uri=True)
+        c.execute('PRAGMA query_only=ON')
+        return c
 
 
 def files(kind):
@@ -108,7 +123,7 @@ class Evidence:
         if ts is None:
             self.issue('missing_timestamp', kind)
             return
-        if not self.since <= ts <= self.until:
+        if not self.since <= ts < self.until:
             return
         try:
             v = tuple(number(x) for x in v)
@@ -274,13 +289,16 @@ def scan_gateway(e, kind, split):
         if lo is None: e.issue('gateway_start_missing', rid)
         e.put('gateway', digest(provider, rid, start.get('ts') or o.get('ts')), ts, provider, model, 'openclaw', v,
               request=rid, start=lo, session=start.get('session'), conversation=inits.get(rid) or o.get('conversationId'),
-              unit='gateway-request', estimated=estimated, legacy_out=legacy_out)
+              unit='gateway-request', estimated=estimated, legacy_out=legacy_out,
+              request_uuid=o.get('requestUuid') or start.get('requestUuid'),
+              reported_v=__import__('usage_v3').gateway_vector(o['usage_reported']) if isinstance(o.get('usage_reported'),dict) else None,
+              time_basis='completion')
 
 
 def scan_trajectories(e, include_db=True, include_files=True):
     transcript_messages=collections.defaultdict(list)
     def project_message(m):
-        if isinstance(m,dict) and m.get('provider') in ('claude-cli-gateway','antigravity-cli-gateway') and m.get('responseId') and isinstance(m.get('usage'),dict):
+        if isinstance(m,dict) and m.get('provider') in ('claude-cli-gateway','antigravity-cli-gateway','muse-cli-gateway') and m.get('responseId') and isinstance(m.get('usage'),dict):
             result={k:m.get(k) for k in ('timestamp','provider','model','usage','responseId')}
             run=(m.get('__openclaw') or {}).get('runId')
             if run: transcript_messages[run].append(result)
@@ -289,10 +307,11 @@ def scan_trajectories(e, include_db=True, include_files=True):
             c = dbopen(path)
             try:
                 if c.execute("SELECT 1 FROM sqlite_master WHERE name='transcript_events'").fetchone():
-                    for row in c.execute("SELECT json_extract(event_json,'$.message.timestamp'),json_extract(event_json,'$.message.provider'),json_extract(event_json,'$.message.model'),json_extract(event_json,'$.message.usage'),json_extract(event_json,'$.message.responseId'),json_extract(event_json,'$.message.__openclaw.runId') FROM transcript_events WHERE json_extract(event_json,'$.message.provider') IN ('claude-cli-gateway','antigravity-cli-gateway') AND json_extract(event_json,'$.message.responseId') IS NOT NULL"):
+                    for row in c.execute("SELECT json_extract(event_json,'$.message.timestamp'),json_extract(event_json,'$.message.provider'),json_extract(event_json,'$.message.model'),json_extract(event_json,'$.message.usage'),json_extract(event_json,'$.message.responseId'),json_extract(event_json,'$.message.__openclaw.runId') FROM transcript_events WHERE json_extract(event_json,'$.message.provider') IN ('claude-cli-gateway','antigravity-cli-gateway','muse-cli-gateway') AND json_extract(event_json,'$.message.responseId') IS NOT NULL"):
                         try: usage=json.loads(row[3]) if isinstance(row[3],str) else row[3]
                         except ValueError: continue
                         project_message(dict(timestamp=row[0],provider=row[1],model=row[2],usage=usage,responseId=row[4],__openclaw={'runId':row[5]}))
+                    __import__('usage_v3').project_compressed_transcripts(c,project_message)
                 for row in c.execute("SELECT event_json FROM trajectory_runtime_events WHERE json_extract(event_json,'$.type') IN ('session.started','model.completed')"):
                     yield path, 0, row[0]
             finally: c.close()
@@ -318,7 +337,7 @@ def scan_trajectories(e, include_db=True, include_files=True):
     # files for gateway runs whose request IDs are absent, not every transcript.
     read_transcripts=set()
     for o,d,messages in completed:
-        if o['provider'] not in ('claude-cli-gateway','antigravity-cli-gateway') or o['runId'] in transcript_messages or not o.get('sessionId'):continue
+        if o['provider'] not in ('claude-cli-gateway','antigravity-cli-gateway','muse-cli-gateway') or o['runId'] in transcript_messages or not o.get('sessionId'):continue
         origin=Path(o['_origin']);parts=origin.parts
         if 'agents' not in parts:continue
         root=Path(*parts[:parts.index('agents')+2]);sid=o['sessionId']
@@ -339,7 +358,7 @@ def scan_trajectories(e, include_db=True, include_files=True):
                   thread=d.get('threadId'), turn=d.get('turnId'), run=o['runId'], start=lo, session=o['sessionKey'], unit='agent-run',
                   responses=[m['responseId'] for m in messages if m['provider']==provider and timestamp(m['timestamp']) is not None and (lo is None or timestamp(m['timestamp'])>=lo-1)])
         for m in messages:
-            if m['provider'] not in ('claude-cli-gateway','antigravity-cli-gateway'): continue
+            if m['provider'] not in ('claude-cli-gateway','antigravity-cli-gateway','muse-cli-gateway'): continue
             mv = e.usage(m['usage'], ('input','cacheWrite','cacheRead','output'), m['responseId'])
             if mv is not None:
                 e.put('gateway-message', m['responseId'], timestamp(m['timestamp']), m['provider'], m['model'], 'openclaw', mv, response=m['responseId'], unit='gateway-request')
@@ -383,8 +402,12 @@ def pbtime(raw):
 
 def scan_agy(e):
     for path in e.paths('agy-db'):
-        c = dbopen(path); conv = Path(path).stem
+        conv = Path(path).stem
+        try: c = dbopen(path)
+        except sqlite3.OperationalError as error:
+            e.issue('agy_db_unreadable', '%s %s' % (conv, error)); continue
         try:
+            models=__import__('usage_v3').agy_models(c)
             for idx, raw in c.execute('SELECT idx,metadata FROM steps WHERE metadata IS NOT NULL'):
                 try:
                     d = wire(raw)
@@ -399,8 +422,9 @@ def scan_agy(e):
                     thinking, response_out = first(u, 9), first(u, 10)
                     if (thinking or response_out) and usage[3] != thinking + response_out:
                         e.issue('agy_output_partition_mismatch', conv)
-                    e.put('agy', mid, ts, 'antigravity-cli-gateway', 'agy-enum-%s' % model_enum, 'agy-cli(含网关)', usage,
-                          conversation=conv, step=idx, enum=model_enum, thinking=thinking, unit='model-response')
+                    names=models.get(model_enum,set()); model=next(iter(names)) if len(names)==1 else 'agy-enum-%s'%model_enum
+                    e.put('agy', mid, ts, 'antigravity-cli-gateway', model, 'agy-cli(含网关)', usage,
+                          conversation=conv, step=idx, enum=model_enum, thinking=thinking, unit='model-response', model_basis='gen-metadata' if len(names)==1 else 'enum', time_basis='completion')
                 except (ValueError, TypeError, UnicodeError) as error:
                     e.issue('agy_schema_error', '%s:%s %s' % (conv, idx, error))
         finally: c.close()
@@ -475,17 +499,20 @@ def summed(rows):
 
 
 def base_model(m):
-    if isinstance(m,str) and m.startswith('gemini-'):
-        for suffix in ('-low','-medium','-high'):
+    if isinstance(m,str) and m.startswith(('gemini-','claude-','gpt-oss-')):
+        for suffix in ('-low','-medium','-high','-xhigh','-max'):
             if m.endswith(suffix): return m[:-len(suffix)]
     return m
 
 
 def reconcile(e):
-    records = list(e.records.values()); active = {r['id']:dict(r,meta=dict(r['meta'])) for r in records}; held = []
+    import usage_v3
+    active = {r['id']:dict(r,meta=dict(r['meta'])) for r in e.records.values()}; held = []
+    usage_v3.reconcile_compactions(e,active)
+    records=list(active.values())
     codex = collections.defaultdict(list); gateways=[]; agy=collections.defaultdict(list); claude_partials=collections.defaultdict(list)
     for r in records:
-        if r['kind']=='codex': codex[(r['meta'].get('thread'),r['meta'].get('turn'))].append(r)
+        if r['kind'] in ('codex','codex-compaction'): codex[(r['meta'].get('thread'),r['meta'].get('turn'))].append(r)
         elif r['kind']=='gateway': gateways.append(r)
         elif r['kind']=='agy': agy[r['meta']['conversation']].append(r)
         elif r['kind']=='claude' and r['meta'].get('request'): claude_partials[r['meta']['request']].append(r)
@@ -495,8 +522,14 @@ def reconcile(e):
         if g['provider']!='claude-cli-gateway': continue
         partial=[r for r in claude_partials.get(g['meta'].get('request'),[]) if (g['meta'].get('start') or g['ts'])-1<=r['ts']<=g['ts']+1]
         for r in partial: active.pop(r['id'],None)
-        if partial: e.stats['claude_gateway_message_reconciled']+=len(partial)
+        if partial:
+            e.stats['claude_gateway_message_reconciled']+=len(partial)
+            if summed(partial)==tuple(g['v']):
+                active[g['id']]['meta']['billing_parts']=[list(r['v']) for r in partial]
     enum_models=collections.defaultdict(set); used_agy=set(); mapped_gw={}
+    for rows in agy.values():
+        for r in rows:
+            if not r['model'].startswith('agy-enum-'):enum_models[r['meta']['enum']].add(r['model'])
     for g in gateways:
         if g['provider']!='antigravity-cli-gateway': continue
         lo,hi = g['meta'].get('start'),g['ts']; candidates=[]
@@ -511,10 +544,11 @@ def reconcile(e):
         if len(candidates)==1 and not any(r['id'] in used_agy for r in candidates[0]):
             subset=candidates[0]; active.pop(g['id'],None); used_agy.update(r['id'] for r in subset)
             mapped_gw[g['id']]=subset
+            g['meta']['replaced_by']=[r['id'] for r in subset]
             e.stats['agy_gateway_reconciled']+=1
             for r in subset:
                 active[r['id']]['source']='openclaw'
-                enum_models[r['meta']['enum']].add(base_model(g['model']))
+                if r['model'].startswith('agy-enum-'):enum_models[r['meta']['enum']].add(base_model(g['model']))
         else:
             # A gateway request whose DB evidence overlaps in time but cannot be
             # reconciled must not be added on top of those DB observations.
@@ -524,7 +558,7 @@ def reconcile(e):
             else:
                 e.issue('agy_gateway_db_missing',g['id'])
     for r in list(active.values()):
-        if r['kind']=='agy':
+        if r['kind']=='agy' and r['model'].startswith('agy-enum-'):
             models=enum_models.get(r['meta']['enum'],set())
             if len(models)==1: r['model']=next(iter(models))
             else: e.issue('agy_model_unresolved',r['model'])
@@ -535,13 +569,13 @@ def reconcile(e):
     for r in records:
         if r['kind']!='gateway-message':continue
         response=r['meta']['response']; short=response.split('cli-',1)[-1][:8]
-        matches=[g for g in gateways if g['provider']==r['provider'] and g['meta'].get('request')==short and (g['meta'].get('start',g['ts']) or g['ts'])-1<=r['ts']<=g['ts']+1]
+        matches=[g for g in gateways if g['provider']==r['provider'] and (g['meta'].get('request_uuid')==response.split('cli-',1)[-1] if g['meta'].get('request_uuid') else g['meta'].get('request','')[:8]==short) and (g['meta'].get('start',g['ts']) or g['ts'])-1<=r['ts']<=g['ts']+1]
         if len(matches)==1:
             active.pop(r['id'],None);message_covered.add(r['id']);e.stats['gateway_message_reconciled']+=1
         elif r['provider']=='claude-cli-gateway':
             message_covered.add(r['id'])
             e.stats['claude_gateway_message_fallback']+=1
-        elif r['provider']=='antigravity-cli-gateway':
+        elif r['provider'] in ('antigravity-cli-gateway','muse-cli-gateway'):
             # Historical gateway messages have the old doubled-thinking output.
             active.pop(r['id'],None); held.append(r);e.issue('agy_message_without_authority',r['id'])
     for r in records:
@@ -554,7 +588,7 @@ def reconcile(e):
                 if summed(linked)==tuple(r['v']) or any(tuple(x['v'])==tuple(r['v']) for x in linked): e.stats['codex_trajectory_reconciled']+=1
                 else: held.append(r);e.issue('codex_trajectory_usage_mismatch',r['id'])
             else: e.stats['codex_trajectory_fallback']+=1
-        elif r['provider'] in ('claude-cli-gateway','antigravity-cli-gateway'):
+        elif r['provider'] in ('claude-cli-gateway','antigravity-cli-gateway','muse-cli-gateway'):
             lo=m.get('start'); linked=[g for g in gateways if g['provider']==r['provider'] and lo is not None and lo-1<=g['ts']<=r['ts']+1 and (not m.get('session') or not g['meta'].get('session') or g['meta'].get('session')==m['session'].split(':run:')[0])]
             # A full run can aggregate many gateway requests. Keep the request
             # observations; don't add the enclosing run again.
@@ -574,6 +608,10 @@ def reconcile(e):
                 else:
                     held.append(r);e.issue('gateway_trajectory_unreconciled',r['id'])
         elif r['provider']=='openai': e.stats['native_openai_restored']+=1
+    usage_v3.reconcile_muse(e,active,held,gateways)
+    usage_v3.reconcile_dalton(e,active,held,gateways)
+    from zcode_usage import reconcile_zcode
+    reconcile_zcode(e, active, held)
     return list(active.values()),held
 
 
@@ -592,7 +630,7 @@ def cached_scan(e, fn, kinds, cache_path=None):
                 try:
                     st=os.stat(q);signature.append((q,st.st_ino,st.st_size,st.st_mtime_ns))
                 except FileNotFoundError:signature.append((q,None))
-    code=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    code=hashlib.sha256(Path(__file__).read_bytes()+Path(__file__).with_name('zcode_usage.py').read_bytes()+Path(__file__).with_name('usage_v3.py').read_bytes()).hexdigest()
     fingerprint=digest(code,signature);key='|'.join(kinds);p=Path(cache_path).expanduser();p.parent.mkdir(parents=True,exist_ok=True)
     c=sqlite3.connect(p,timeout=30);os.chmod(p,0o600)
     try:

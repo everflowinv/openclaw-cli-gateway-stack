@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Harvest the bounded Dalton broker retry journal without invoking a model."""
+"""Harvest recent volatile model usage evidence without invoking a model."""
 import datetime
 import json
 import os
@@ -12,7 +12,7 @@ state.mkdir(parents=True,exist_ok=True)
 runner=Path.home()/'.openclaw/agents/main/agent/workshop-skills/model-usage-cost/scripts/run.sh'
 try:
     python=runner.parent.parent/'venv/bin/python'
-    command=[str(python),str(runner.parent/'model_usage_cost_cli.py'),'collect-broker','--json'] if python.exists() else ['/bin/bash',str(runner),'collect-broker','--json']
+    command=[str(python),str(runner.parent/'model_usage_cost_cli.py'),'collect-broker','--days','2','--json'] if python.exists() else ['/bin/bash',str(runner),'collect-broker','--days','2','--json']
     result=subprocess.run(command,capture_output=True,text=True,timeout=50)
     try: status=json.loads(result.stdout)
     except ValueError: status={'ok':False,'error':'collector did not return JSON','hint':'Run model-usage-cost collect-broker --json manually.'}
