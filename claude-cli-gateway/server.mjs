@@ -9,6 +9,7 @@ import path from "node:path";
 import { normalizedClaudeUsage as normalizedUsage, contextClaudeUsage } from "../lib/cli-output.mjs";
 
 import { createCliVersionProbe } from "../lib/cli-version.mjs";
+import { createCliProcessCleanup } from "../lib/cli-process-cleanup.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE = process.env.CLAUDE_CLI_GATEWAY_WORKSPACE
@@ -21,6 +22,7 @@ const MCP_CONFIG = process.env.CLAUDE_CLI_MCP_CONFIG || path.join(HERE, "mcp.jso
 const MAX_CONCURRENT = numberFromEnv("CLAUDE_CLI_GATEWAY_MAX_CONCURRENT", 4, 1, 32);
 const QUEUE_TIMEOUT_MS = numberFromEnv("CLAUDE_CLI_GATEWAY_QUEUE_TIMEOUT_SECONDS", 120, 1, 3600) * 1000;
 const TIMEOUT_MS = numberFromEnv("CLAUDE_CLI_GATEWAY_TIMEOUT_SECONDS", 3600, 30, 86400) * 1000;
+const STALL_TIMEOUT_MS = numberFromEnv("CLAUDE_CLI_GATEWAY_STALL_SECONDS", 1200, 1, 3600) * 1000;
 const MAX_TURNS = numberFromEnv("CLAUDE_CLI_GATEWAY_MAX_TURNS", 200, 1, 1000);
 // Hard per-call ceiling for openclaw exec/process tools. Without it the model
 // may pass timeoutMs up to the proxy default of 30 min, outliving caller turn
@@ -72,6 +74,8 @@ if (MODEL_ALLOWLIST.length) {
 
 let activeRequests = 0;
 const waiters = [];
+const shutdownController = new AbortController();
+const runningCancels = new Set();
 
 function writeLiveLog(requestId, event, fields = {}) {
   const record = {
@@ -449,6 +453,7 @@ function createClaudeProcess(job) {
     ? ["pipe", "pipe", "pipe", "pipe"]
     : ["pipe", "pipe", "pipe"];
   const child = spawn(CLAUDE_BIN, args, {
+    detached: true,
     cwd: WORKSPACE,
     env: { ...cliEnvironment(job.requesterSessionKey), ...(job.effort ? { CLAUDE_CODE_EFFORT_LEVEL: job.effort } : {}) },
     stdio,
@@ -481,22 +486,33 @@ function runClaude(job, callbacks) {
     let stderr = "";
     let resultEvent;
     let settled = false;
-    let timedOut = false;
+    let lastOutputAt = Date.now();
+    let lingerTimer;
     // Per-model-call usage from assistant events; result.usage is their sum.
     let firstCallUsage = null;
     let lastCallUsage = null;
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000).unref();
-    }, TIMEOUT_MS);
+    const cleanup = createCliProcessCleanup(child, { onForcedClose: error => finish(error) });
+    const failure = (message, code, statusCode = 504) => Object.assign(new Error(message), { code, statusCode });
+    const timer = setTimeout(() => cleanup.terminate(failure(
+      `Claude CLI timed out after ${TIMEOUT_MS / 1000} seconds`, 'CLAUDE_CLI_TIMEOUT',
+    )), TIMEOUT_MS);
     timer.unref();
+    // Only CLI stdout counts as progress; gateway heartbeats never reset this.
+    const stallTimer = setInterval(() => {
+      if (Date.now() - lastOutputAt >= STALL_TIMEOUT_MS) cleanup.terminate(failure(
+        `Claude CLI stalled: no output for ${STALL_TIMEOUT_MS / 1000} seconds`, 'CLAUDE_CLI_STALL',
+      ));
+    }, Math.min(STALL_TIMEOUT_MS, 5000));
+    stallTimer.unref();
 
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearInterval(stallTimer);
+      clearTimeout(lingerTimer);
+      cleanup.dispose();
       if (error) reject(error);
       else resolve(value);
     };
@@ -507,6 +523,8 @@ function runClaude(job, callbacks) {
       if (stderr.length > 12000) stderr = stderr.slice(-12000);
     });
     child.stdout.on("data", (chunk) => {
+      if (settled || cleanup.error) return;
+      lastOutputAt = Date.now();
       stdoutBuffer += stdoutDecoder.write(chunk);
       let newline;
       while ((newline = stdoutBuffer.indexOf("\n")) !== -1) {
@@ -537,6 +555,19 @@ function runClaude(job, callbacks) {
         } else if (event.type === "result") {
           resultEvent = event;
           callbacks.onResult?.(event);
+          if (event.subtype !== 'success' || event.is_error === true) {
+            const error = failure(sanitizeError(event.result || event.errors?.join?.('\n')) || 'Claude CLI failed', 'CLAUDE_CLI_ERROR', 502);
+            error.resultEvent = event;
+            cleanup.terminate(error);
+          } else {
+            // Keep exit verification, but do not hold a slot for a CLI that
+            // has finished its turn and never exits.
+            clearTimeout(lingerTimer);
+            lingerTimer = setTimeout(() => cleanup.terminate(failure(
+              'Claude CLI did not exit after its terminal result', 'CLAUDE_CLI_EXIT_TIMEOUT', 502,
+            )), 10000);
+            lingerTimer.unref();
+          }
         } else if (event.type === "user") {
           const content = event.message?.content;
           const toolResults = Array.isArray(content)
@@ -547,11 +578,7 @@ function runClaude(job, callbacks) {
       }
     });
     child.on("close", (code, signal) => {
-      if (timedOut) {
-        const error = new Error(`Claude CLI timed out after ${Math.round(TIMEOUT_MS / 1000)} seconds`);
-        error.code = "CLAUDE_CLI_TIMEOUT";
-        return finish(error);
-      }
+      if (cleanup.error) return finish(cleanup.error);
       if (resultEvent && resultEvent.subtype === "success" && resultEvent.is_error !== true) {
         return finish(null, firstCallUsage ? { ...resultEvent, firstCallUsage, lastCallUsage } : resultEvent);
       }
@@ -567,7 +594,7 @@ function runClaude(job, callbacks) {
       return finish(error);
     });
 
-    callbacks.onChild?.(child);
+    callbacks.onChild?.(child, () => cleanup.terminate(failure('Request cancelled', 'CLAUDE_CLI_CANCELLED', 499)));
   });
 }
 
@@ -610,7 +637,7 @@ async function handleChatCompletion(req, res, body) {
   if (req.aborted || res.destroyed) cancelQueued();
   let release;
   try {
-    release = await acquireSlot(queuedController.signal);
+    release = await acquireSlot(AbortSignal.any([queuedController.signal, shutdownController.signal]));
   } catch (error) {
     writeLiveLog(requestId, "queue_timeout", {
       model: job.model,
@@ -623,10 +650,10 @@ async function handleChatCompletion(req, res, body) {
     req.removeListener('aborted', cancelQueued);
     res.removeListener('close', cancelQueued);
   }
-  if (queuedController.signal.aborted || res.destroyed) { release(); return; }
+  if (queuedController.signal.aborted || shutdownController.signal.aborted || res.destroyed) { release(); return; }
   const queuedMs = Date.now() - queuedAt;
   const startedAt = Date.now();
-  let child;
+  let cancelChild;
   let finished = false;
   let cancelLogged = false;
 
@@ -642,7 +669,7 @@ async function handleChatCompletion(req, res, body) {
   });
 
   const logCallbacks = {
-    onChild: (value) => { child = value; },
+    onChild: (_value, cancel) => { cancelChild = cancel; },
     onThinking: (text) => {
       if (text) writeLiveLog(requestId, "thinking", { text });
     },
@@ -686,15 +713,15 @@ async function handleChatCompletion(req, res, body) {
   };
 
   const cancel = () => {
-    if (!finished && child && child.exitCode === null && child.signalCode === null) {
+    if (!finished && cancelChild) {
       if (!cancelLogged) {
         cancelLogged = true;
         writeLiveLog(requestId, "cancel", { durationMs: Date.now() - startedAt });
       }
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000).unref();
+      cancelChild();
     }
   };
+  runningCancels.add(cancel);
   req.on("aborted", cancel);
   res.on("close", cancel);
 
@@ -794,6 +821,7 @@ async function handleChatCompletion(req, res, body) {
     }
   } finally {
     finished = true;
+    runningCancels.delete(cancel);
     req.removeListener('aborted', cancel);
     res.removeListener('close', cancel);
     release();
@@ -815,6 +843,9 @@ const server = http.createServer(async (req, res) => {
         maxConcurrent: MAX_CONCURRENT,
         queueTimeoutSeconds: Math.round(QUEUE_TIMEOUT_MS / 1000),
         timeoutSeconds: Math.round(TIMEOUT_MS / 1000),
+        stallTimeoutSeconds: STALL_TIMEOUT_MS / 1000,
+        processGroupCleanup: true,
+        cleanupDeadlineSeconds: 6,
         execMaxTimeoutMs: EXEC_MAX_TIMEOUT_MS,
         reasoningEfforts: EFFORTS,
         outputTokenLimitEnforced: false,
@@ -863,6 +894,8 @@ server.listen(PORT, HOST, () => {
 
 function shutdown(signal) {
   process.stdout.write(`[claude-cli-gateway] received ${signal}, shutting down\n`);
+  shutdownController.abort();
+  for (const cancel of runningCancels) cancel();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 10_000).unref();
 }

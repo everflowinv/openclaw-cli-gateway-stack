@@ -45,6 +45,10 @@
 - `MUSE_CLI_GATEWAY_QUEUE_TIMEOUT_MS`：默认 `120000`。
 - `MUSE_CLI_GATEWAY_TIMEOUT_MS`：默认 `1800000`。
 - `MUSE_CLI_GATEWAY_STALL_MS`：默认 `300000`。
+  仅 CLI stdout 刷新停滞计时，网关心跳不计入。失败终态立即触发进程组清理；
+  取消、停滞、超时后先 SIGTERM，2 秒后 SIGKILL，再过 1 秒仍未关闭输出管道
+  则强制收尾、释放槽位并删除临时目录。CLI 主进程退出时也回收 MCP 子进程。
+  `/health` 返回停滞阈值、进程组清理状态及清理时限。
 - `MUSE_CLI_GATEWAY_MAX_MODEL_STEPS`：默认 `100`。
 - `MUSE_CLI_GATEWAY_EXEC_MAX_TIMEOUT_MS`：默认 `600000`。
 - `MUSE_CLI_GATEWAY_MAX_PROMPT_BYTES`：默认 `1400000`（不可通过环境变量上调），按 UTF-8 字节检查。

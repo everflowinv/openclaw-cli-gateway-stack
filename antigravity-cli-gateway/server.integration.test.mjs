@@ -94,6 +94,7 @@ fs.appendFileSync(process.env.TEST_AGY_CALLS, JSON.stringify(process.argv.slice(
 let input = "";
 process.stdin.on("data", chunk => { input += chunk; });
 process.stdin.on("end", async () => {
+  if (input.includes('stall-case')) { process.on('SIGTERM',()=>{}); setInterval(()=>{},1000); return; }
   if (input.includes("queue-delay")) await new Promise(r => setTimeout(r, 1500));
   console.log(JSON.stringify({event:"init",conversation_id:"agy-test-conversation",init:{model:"gemini-3.8-flash"}}));
   if (input.includes("partial-failure")) {
@@ -122,6 +123,8 @@ process.stdin.on("end", async () => {
       AGY_CLI_GATEWAY_MAX_BODY_MB: "1",
       AGY_CLI_GATEWAY_CWD: root,
       AGY_CLI_GATEWAY_MAX_CONCURRENT: "1",
+      AGY_CLI_GATEWAY_STALL_SECONDS: "10",
+      AGY_CLI_GATEWAY_HEARTBEAT_SECONDS: "1",
       AGY_CLI_GATEWAY_MAX_PROMPT_BYTES: "10000",
       AGY_CLI_GATEWAY_MAX_PROMPT_CHARS: "20000",
       TEST_AGY_CALLS: calls,
@@ -196,6 +199,12 @@ process.stdin.on("end", async () => {
     assert.match(failedStream,/AGY_CLI_ERROR/);
     assert.doesNotMatch(failedStream,/"finish_reason":"stop"/);
     await checkCancelledQueue(port, {model:'gemini-3.8-flash', messages:[{role:'user',content:'queue-delay'}]});
+    const stalledAt = Date.now();
+    const stalled = await requestRaw(port, {model:'gemini-3.8-flash', messages:[{role:'user',content:'stall-case'}], stream:true});
+    assert.match(stalled, /AGY_CLI_STALL/);
+    assert.match(stalled, /gateway heartbeat/, "SSE heartbeat must not hide a CLI stall");
+    assert.ok(Date.now() - stalledAt < 19000, 'stall cleanup must not wait forever for close');
+    assert.equal((await send([{role:'user',content:'recovered'}])).status, 200);
     const tooLarge = await send([{role:'user',content:'x'.repeat(1100000)}]);
     assert.equal(tooLarge.status, 413);
     console.log("antigravity gateway integration: UTF-8 limit, Chinese/emoji, streaming rejection, full history, normal request and first-call context usage ok");

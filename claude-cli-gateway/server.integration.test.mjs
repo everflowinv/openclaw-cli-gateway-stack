@@ -75,7 +75,14 @@ if (process.argv.includes("--version")) {
 let input="";
 process.stdin.on("data", chunk => { input += chunk; });
 process.stdin.on("end", () => {
+  if (input.includes('stall-case')) { process.on('SIGTERM',()=>{}); setInterval(()=>{},1000); return; }
+  if (input.includes('failure-hang-case')) {
+    console.log(JSON.stringify({type:'result',subtype:'error',is_error:true,result:'fixture failed'}));
+    setInterval(()=>{},1000); return;
+  }
+  const progress = input.includes('progress-case') ? setInterval(()=>console.log('{}'),400) : null;
   setTimeout(() => {
+    clearInterval(progress);
     console.log(JSON.stringify({type:"assistant",message:{id:"msg-usage-fixture",model:"claude-opus-5-5",usage:{input_tokens:10,cache_creation_input_tokens:4000,cache_read_input_tokens:900,output_tokens:2}}}));
     console.log(JSON.stringify({type:"assistant",message:{id:"msg-usage-fixture-2",model:"claude-opus-5-5",usage:{input_tokens:5,cache_creation_input_tokens:300,cache_read_input_tokens:4900,output_tokens:18}}}));
     process.stdout.write(JSON.stringify({
@@ -85,7 +92,7 @@ process.stdin.on("end", () => {
       result: input.includes('effort-case') ? JSON.stringify({effort:process.argv[process.argv.indexOf('--effort')+1],envEffort:process.env.CLAUDE_CODE_EFFORT_LEVEL}) : "ok",
       usage: { input_tokens: "15", cache_read_input_tokens: "5800", cache_creation_input_tokens: 4300, output_tokens: 20.7 },
     }) + "\\n");
-  }, input.includes("effort-case") ? 5 : 1800);
+  }, input.includes("effort-case") ? 5 : input.includes("progress-case") ? 11500 : 1800);
 });
 `, "utf8");
   fs.chmodSync(fakeClaude, 0o700);
@@ -101,6 +108,8 @@ process.stdin.on("end", () => {
       CLAUDE_CLI_GATEWAY_MAX_CONCURRENT: "1",
       CLAUDE_CLI_GATEWAY_QUEUE_TIMEOUT_SECONDS: "1",
       CLAUDE_CLI_GATEWAY_TIMEOUT_SECONDS: "30",
+      CLAUDE_CLI_GATEWAY_STALL_SECONDS: "10",
+      CLAUDE_CLI_GATEWAY_HEARTBEAT_IDLE_SECONDS: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -159,6 +168,16 @@ process.stdin.on("end", () => {
       assert.deepEqual(JSON.parse(result.body.choices[0].message.content), {effort:expected,envEffort:expected});
     }
     await checkCancelledQueue(port, requestBody);
+    for (const [content, expected] of [['failure-hang-case','CLAUDE_CLI_ERROR'], ['stall-case','CLAUDE_CLI_STALL']]) {
+      const start = Date.now();
+      const failed = await requestJson(port, 'POST', '/v1/chat/completions', {...requestBody, messages:[{role:'user',content}], stream:true});
+      assert.match(String(failed.body), new RegExp(expected));
+      if (content === 'stall-case') assert.match(String(failed.body), /gateway heartbeat/, 'SSE heartbeat must not hide a CLI stall');
+      assert.ok(Date.now() - start < 19000, 'cleanup must have a bounded deadline');
+      assert.equal((await waitForHealth(port)).activeRequests, 0);
+      assert.equal((await requestJson(port, 'POST', '/v1/chat/completions', {...requestBody, messages:[{role:'user',content:'effort-case'}]})).status, 200);
+    }
+    assert.equal((await requestJson(port, 'POST', '/v1/chat/completions', {...requestBody, messages:[{role:'user',content:'progress-case'}]})).status, 200, 'real stdout must refresh the stall timer');
     const tooLarge = await requestJson(port, 'POST', '/v1/chat/completions', { ...requestBody, messages: [{role:'user', content:'x'.repeat(1100000)}] });
     assert.equal(tooLarge.status, 413);
     process.stdout.write("claude-cli gateway integration: queue timeout and first-call context usage ok\n");

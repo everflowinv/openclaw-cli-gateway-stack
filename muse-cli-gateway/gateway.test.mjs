@@ -83,11 +83,11 @@ fs.writeFileSync(path.join(journalDir,'session.jsonl'),records.map(r=>JSON.strin
 const emit=(type,p={})=>console.log(JSON.stringify({payload_type:type,stream:{id:'fixture-session'},payload:{...p,run_stream:{id:'fixture-root'}}}));
 emit('run.model.configured',{provider_id:'meta',model_id:prompt.includes('CASE=wrong')?'muse-spark-1.2':selectedModel});
 if(prompt.includes('CASE=incomplete')) process.exit(0);
-if(prompt.includes('CASE=hang')) { setInterval(()=>{},1000); }
+if(prompt.includes('CASE=hang')) { if(prompt.includes('ignore-term')) process.on('SIGTERM',()=>{}); setInterval(()=>{},1000); }
 else setTimeout(()=>{
   if (prompt.includes('CASE=fail')) {
     emit('run.output.delta',{text:'partial answer'});
-    emit('run.terminal.failed',{terminal:'failed',reason:'fixture failure'}); process.exit(1);
+    emit('run.terminal.failed',{terminal:'failed',reason:'fixture failure'}); if(prompt.includes('linger')) { setInterval(()=>{},1000); return; } process.exit(1);
   }
   emit('tool.result',{call_id:'test-call',text:'fixture tool output',correlation_facts:{tool_name:'mcp__openclaw__read',outcome:'success'}});
   const result=JSON.stringify({text:'好😀',tools:cfg.mcp_servers.openclaw?.env.OPENCLAW_MCP_ENABLED_TOOLS??null,session:cfg.mcp_servers.openclaw?.env.OPENCLAW_REQUESTER_SESSION_KEY??null});
@@ -154,6 +154,19 @@ test('queue timeout and model timeout release slots and remove request files', a
   const timed = await request(body('CASE=hang')); assert.equal(timed.status, 504);
   assert.equal((await timed.json()).error.code, 'MUSE_TIMEOUT');
   assert.equal(fs.readdirSync(path.join(root, 'state')).length, 0);
+});
+test('unresponsive CLI is force-killed and terminal failure does not wait for model timeout', async () => {
+  const failedAt = Date.now();
+  const failed = await request(body('CASE=fail linger'));
+  assert.equal((await failed.json()).error.code, 'MUSE_TURN_FAILED');
+  assert.ok(Date.now() - failedAt < 850);
+  const timedAt = Date.now();
+  const timed = await request(body('CASE=hang ignore-term'));
+  assert.equal((await timed.json()).error.code, 'MUSE_TIMEOUT');
+  assert.ok(Date.now() - timedAt < 4500);
+  assert.equal((await (await fetch(base + '/health')).json()).activeRequests, 0);
+  assert.equal(fs.readdirSync(path.join(root, 'state')).length, 0);
+  assert.equal((await request(body('CASE=ok'))).status, 200);
 });
 test('content logs include live text, tool arguments and results without duplicating final text', async () => {
   const offset = logs.length;

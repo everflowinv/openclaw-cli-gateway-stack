@@ -102,6 +102,11 @@ models in openclaw.json.
   minutes instead of waiting for the full timeout. Success also resolves on
   the `result` event (newer agy lingers or hangs after it); the child is
   reaped after a 10s grace (`linger_kill` log event).
+- CLI cleanup targets the entire process group, including MCP descendants.
+  Cancellation/stall/timeout escalates to SIGKILL after 5 seconds and forces
+  request settlement after at most one more second if pipes never close.
+  Gateway SSE heartbeats do not refresh the stdout stall watchdog. `/health`
+  exposes `stallTimeoutSeconds`, `processGroupCleanup`, and `cleanupDeadlineSeconds`.
 - **Verified completion**: only a successful terminal result completes a turn.
   ERROR/interrupted/timeout output remains diagnostic text and produces an error,
   including on SSE. No successful `stop` is emitted for a failed partial answer.

@@ -63,6 +63,13 @@ Environment controls:
 - `CLAUDE_CLI_GATEWAY_MAX_CONCURRENT` (default `4`)
 - `CLAUDE_CLI_GATEWAY_QUEUE_TIMEOUT_SECONDS` (default `120`)
 - `CLAUDE_CLI_GATEWAY_TIMEOUT_SECONDS` (default `3600`)
+- `CLAUDE_CLI_GATEWAY_STALL_SECONDS` (default `1200`): terminate a request
+  after 20 minutes without CLI stdout. Gateway SSE heartbeats do not count as
+  CLI progress. Cancellation/stall/timeout sends SIGTERM to the CLI process
+  group, escalates to SIGKILL after 5 seconds, then releases the request within
+  another second even if inherited output pipes never close. Terminal errors
+  trigger cleanup immediately; a successful result gets 10 seconds to exit.
+  `/health` exposes the stall timeout and cleanup deadline.
 - `CLAUDE_CLI_GATEWAY_MAX_TURNS` (default `200`)
 - `CLAUDE_CLI_GATEWAY_EXEC_MAX_TIMEOUT_MS` (default `600000` = 10 min; per-call
   ceiling passed to the openclaw MCP proxy as
@@ -80,9 +87,14 @@ Environment controls:
 
 已验证官方 CLI 2.1.280 可使用 `claude-opus-5-5`；2.1.273 会被服务端明确拒绝。API 刊例为输入 $4、缓存读取 $0.20、5分钟缓存写入 $5、输出 $20，均为每百万 tokens；1小时缓存写入另为 $8。CLI实测模型元数据为1M context、128K max output。
 
-本机为保留原入口正在执行的任务，使用同一份server.mjs另开仅允许Opus5.5的loopback4572入口（`ai.openclaw.claude-opus55-cli-gateway`）。OpenClaw的单模型baseUrl指向4572，其余Claude模型仍用4568。两个入口使用同一官方CLI登录和同一个日志文件，看板中合并显示。默认模型不变；只将原Opus5引用替换为Opus5.5。
+最初为保留原入口正在执行的任务，曾使用同一份 `server.mjs` 另开仅允许
+Opus 5.5 的 `4572` 入口。它使用同一个官方 CLI 登录，不代表模型或 CLI
+只能运行两个并发请求。
 
-独立入口模板：`launchd/claude-opus55-cli-gateway.plist.template`。它不是第二份代码或API凭据，也不会中断原4568上的请求。主入口后续正常维护重启时会读取最新模型目录；旧会话文本和历史测试数据保留原型号。
+2026-10-10：移除 OpenClaw 中 Opus 5.5 的单模型 `baseUrl` 覆盖，统一继承
+Claude provider 的 `http://127.0.0.1:4568/v1`。Opus、Sonnet、Fable 和 Haiku
+共享该入口的 6 个并发槽位。旧 `4572` 入口在现有请求排空后停用，其
+LaunchAgent 从自动加载目录移出；独立入口模板仅保留作历史／隔离部署参考。
 
 ## Haiku 5.5 接入（2026-10-07）
 

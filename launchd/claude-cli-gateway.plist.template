@@ -6,6 +6,8 @@
 	<dict>
 		<key>CLAUDE_CLI_GATEWAY_MAX_CONCURRENT</key>
 		<string>6</string>
+		<key>CLAUDE_CLI_GATEWAY_STALL_SECONDS</key>
+		<string>1200</string>
 		<key>CLAUDE_CLI_GATEWAY_PORT</key>
 		<string>4568</string>
 		<key>CLAUDE_CLI_GATEWAY_QUEUE_TIMEOUT_SECONDS</key>

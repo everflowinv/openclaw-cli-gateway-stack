@@ -6,6 +6,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { failure, MODEL } from './request.mjs';
 import { collectUsage } from './usage.mjs';
 import { MuseDetails } from './details.mjs';
+import { createCliProcessCleanup } from '../lib/cli-process-cleanup.mjs';
 
 export function subscriptionStatus(authPath) {
   try {
@@ -112,17 +113,19 @@ export async function runMuse(job, config, { signal, onText, onEvent, onActivity
     return await new Promise((resolve, reject) => {
       child = spawn(config.cliBin, args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
       const decoder = new StringDecoder('utf8');
-      let buffer = '', stderr = '', terminalError = null, settled = false, killTimer, lingerTimer;
+      let buffer = '', stderr = '', terminalError = null, settled = false, lingerTimer;
       let lastActivity = Date.now();
-      const kill = (sig) => { try { process.kill(-child.pid, sig); } catch {} };
+      const cleanup = createCliProcessCleanup(child, { killGraceMs: 2000, onForcedClose: error => finish(terminalError ?? error) });
       const stop = (error) => {
         terminalError ??= error;
-        kill('SIGTERM');
-        killTimer ??= setTimeout(() => kill('SIGKILL'), 2000);
-        killTimer.unref();
+        cleanup.terminate(terminalError);
       };
       const abort = () => stop(failure('Request cancelled', 'MUSE_CANCELLED', 499));
-      const parser = new MuseEvents({ onText, onEvent, onActivity, onTerminal: () => {
+      const parser = new MuseEvents({ onText, onEvent, onActivity, onTerminal: terminal => {
+        if (terminal.terminal !== 'completed') {
+          try { parser.result(1); } catch (error) { stop(error); }
+          return;
+        }
         // The CLI should exit after the terminal. Reap a lingering process,
         // but never reinterpret a killed/incomplete request as success.
         lingerTimer = setTimeout(() => stop(failure('Muse did not exit after its terminal result', 'MUSE_EXIT_TIMEOUT', 502)), config.exitGraceMs);
@@ -150,9 +153,9 @@ export async function runMuse(job, config, { signal, onText, onEvent, onActivity
         if (settled) return;
         settled = true;
         clearInterval(detailTimer); pollDetails();
-        clearTimeout(timeout); clearTimeout(killTimer); clearTimeout(lingerTimer); clearInterval(watchdog);
+        clearTimeout(timeout); clearTimeout(lingerTimer); clearInterval(watchdog);
         signal?.removeEventListener('abort', abort);
-        kill('SIGKILL'); // no orphaned MCP children after the CLI exits
+        cleanup.dispose();
         let accounting;
         try {
           accounting = collectUsage(path.join(dataDir, 'muse/sessions'), { rootRunId: parser.runId, rootSessionId: parser.sessionId, expectedPromptBytes: Buffer.byteLength(job.prompt) });

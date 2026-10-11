@@ -13,6 +13,7 @@ import path from "node:path";
 import { normalizedAgyUsage as normalizedUsage, rawAgyUsage as rawUsage, contextAgyUsage, truncateText } from "../lib/cli-output.mjs";
 
 import { createCliVersionProbe } from "../lib/cli-version.mjs";
+import { createCliProcessCleanup } from "../lib/cli-process-cleanup.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // OpenClaw workspace location; agy itself runs in the isolated AGY_CWD.
@@ -56,7 +57,7 @@ const MAX_PROMPT_BYTES = numberFromEnv(
 // polls forever). If agy produces no stdout at all for this long, kill it and
 // surface an error so OpenClaw can fail over instead of waiting TIMEOUT_MS.
 // Generously sized: a pure long-thinking phase also produces no output.
-const STALL_TIMEOUT_MS = numberFromEnv("AGY_CLI_GATEWAY_STALL_SECONDS", 600, 30, 3600) * 1000;
+const STALL_TIMEOUT_MS = numberFromEnv("AGY_CLI_GATEWAY_STALL_SECONDS", 600, 1, 3600) * 1000;
 // agy streams one text_delta per completed agent step, not per token, and
 // emits nothing at all while tools run. Same watchdog workaround as the
 // claude gateway: reasoning_content heartbeats on tool activity and after
@@ -73,6 +74,8 @@ const MODELS = new Map([
   ["gemini-3.8-flash", { id: "gemini-3.8-flash", agyModel: "gemini-3.8-flash", created: 1784851200, input: ["text"], reasoning: true }],
   ["gemini-3.1-pro-preview", { id: "gemini-3.1-pro-preview", agyModel: "gemini-3.1-pro", created: 1784851200, input: ["text"], reasoning: true }],
   ["gemini-3.1-pro", { id: "gemini-3.1-pro", agyModel: "gemini-3.1-pro", created: 1784851200, input: ["text"], reasoning: true }],
+  ["claude-opus-5-5", { id: "claude-opus-5-5", agyModel: "claude-opus-5-5", created: 1784851200, input: ["text"], reasoning: true }],
+  ["claude-sonnet-5-5", { id: "claude-sonnet-5-5", agyModel: "claude-sonnet-5-5", created: 1784851200, input: ["text"], reasoning: true }],
 ]);
 const EFFORTS = ["low", "medium", "high"];
 const DEFAULT_EFFORT = process.env.AGY_CLI_GATEWAY_DEFAULT_EFFORT || "low";
@@ -107,6 +110,8 @@ function mapEffort(requested, fallbackEffort, modelMeta) {
 
 let activeRequests = 0;
 const waiters = [];
+const shutdownController = new AbortController();
+const runningCancels = new Set();
 
 function writeLiveLog(requestId, event, fields = {}) {
   const record = {
@@ -381,6 +386,7 @@ function createAgyProcess(job) {
     "--print-timeout", `${Math.ceil(TIMEOUT_MS / 1000) + 60}s`,
   ];
   const child = spawn(AGY_BIN, args, {
+    detached: true,
     cwd: AGY_CWD,
     env: cliEnvironment(job.requesterSessionKey),
     stdio: ["pipe", "pipe", "pipe"],
@@ -442,19 +448,17 @@ function runAgy(job, callbacks) {
     let stderr = "";
     let resultEvent;
     let settled = false;
-    let timedOut = false;
-    let stalled = false;
     let lastOutputAt = Date.now();
     let textOut = "";
     // Per-model-call usage from step_update; result.usage is their sum.
     let firstCallUsage = null;
     let lastCallUsage = null;
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000).unref();
-    }, TIMEOUT_MS);
+    const cleanup = createCliProcessCleanup(child, { onForcedClose: error => finish(error) });
+    const failure = (message, code, statusCode = 504) => Object.assign(new Error(message), { code, statusCode });
+    const timer = setTimeout(() => cleanup.terminate(failure(
+      `Antigravity CLI timed out after ${TIMEOUT_MS / 1000} seconds`, 'AGY_CLI_TIMEOUT',
+    )), TIMEOUT_MS);
     timer.unref();
 
     // Stream-stall watchdog: agy 1.1.26 can lose the model connection
@@ -464,10 +468,8 @@ function runAgy(job, callbacks) {
     const stallInterval = setInterval(() => {
       if (settled) return;
       if (Date.now() - lastOutputAt < STALL_TIMEOUT_MS) return;
-      stalled = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000).unref();
-    }, 5000);
+      cleanup.terminate(failure(`Antigravity CLI stalled: no output for ${STALL_TIMEOUT_MS / 1000} seconds`, 'AGY_CLI_STALL'));
+    }, Math.min(STALL_TIMEOUT_MS, 5000));
     stallInterval.unref();
 
     // Success no longer waits for process exit: newer agy versions linger
@@ -479,8 +481,7 @@ function runAgy(job, callbacks) {
       lingerTimer = setTimeout(() => {
         if (child.exitCode !== null || child.signalCode !== null) return;
         callbacks.onLingerKill?.(resultEvent);
-        child.kill("SIGTERM");
-        setTimeout(() => child.kill("SIGKILL"), 5000).unref();
+        cleanup.terminate();
       }, 10_000);
       lingerTimer.unref();
     };
@@ -495,12 +496,13 @@ function runAgy(job, callbacks) {
       else resolve(firstCallUsage ? { ...value, firstCallUsage, lastCallUsage } : value);
     };
 
-    child.on("error", (error) => finish(error));
+    child.on("error", (error) => { cleanup.dispose(); finish(error); });
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString("utf8");
       if (stderr.length > 12000) stderr = stderr.slice(-12000);
     });
     child.stdout.on("data", (chunk) => {
+      if (settled || cleanup.error) return;
       lastOutputAt = Date.now();
       stdoutBuffer += stdoutDecoder.write(chunk);
       let newline;
@@ -549,18 +551,8 @@ function runAgy(job, callbacks) {
       }
     });
     child.on("close", (code, signal) => {
-      if (timedOut || stalled) {
-        if (timedOut) {
-          const error = new Error(`Antigravity CLI timed out after ${Math.round(TIMEOUT_MS / 1000)} seconds`);
-          error.code = "AGY_CLI_TIMEOUT";
-          return finish(error);
-        }
-        const error = new Error(
-          `Antigravity CLI stalled: no output for ${Math.round(STALL_TIMEOUT_MS / 1000)}s (stream likely dropped mid-response; last output ${Math.round((Date.now() - lastOutputAt) / 1000)}s ago)`,
-        );
-        error.code = "AGY_CLI_STALL";
-        return finish(error);
-      }
+      clearTimeout(lingerTimer);
+      if (cleanup.error) return finish(cleanup.error);
       if (resultEvent && resultEvent.status === "SUCCESS" && !resultEvent.error) {
         return finish(null, resultEvent);
       }
@@ -578,7 +570,7 @@ function runAgy(job, callbacks) {
       return finish(error);
     });
 
-    callbacks.onChild?.(child);
+    callbacks.onChild?.(child, () => cleanup.terminate(failure('Request cancelled', 'AGY_CLI_CANCELLED', 499)));
   });
 }
 
@@ -621,7 +613,7 @@ async function handleChatCompletion(req, res, body) {
   if (req.aborted || res.destroyed) cancelQueued();
   let release;
   try {
-    release = await acquireSlot(queuedController.signal);
+    release = await acquireSlot(AbortSignal.any([queuedController.signal, shutdownController.signal]));
   } catch (error) {
     writeLiveLog(requestId, "queue_timeout", {
       model: job.model,
@@ -634,10 +626,10 @@ async function handleChatCompletion(req, res, body) {
     req.removeListener('aborted', cancelQueued);
     res.removeListener('close', cancelQueued);
   }
-  if (queuedController.signal.aborted || res.destroyed) { release(); return; }
+  if (queuedController.signal.aborted || shutdownController.signal.aborted || res.destroyed) { release(); return; }
   const queuedMs = Date.now() - queuedAt;
   const startedAt = Date.now();
-  let child;
+  let cancelChild;
   let finished = false;
   let cancelLogged = false;
 
@@ -654,7 +646,7 @@ async function handleChatCompletion(req, res, body) {
   });
 
   const logCallbacks = {
-    onChild: (value) => { child = value; },
+    onChild: (_value, cancel) => { cancelChild = cancel; },
     onInit: (init) => {
       writeLiveLog(requestId, "init", {
         conversationId: init.conversationId || null,
@@ -714,15 +706,15 @@ async function handleChatCompletion(req, res, body) {
   };
 
   const cancel = () => {
-    if (!finished && child && child.exitCode === null && child.signalCode === null) {
+    if (!finished && cancelChild) {
       if (!cancelLogged) {
         cancelLogged = true;
         writeLiveLog(requestId, "cancel", { durationMs: Date.now() - startedAt });
       }
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000).unref();
+      cancelChild();
     }
   };
+  runningCancels.add(cancel);
   req.on("aborted", cancel);
   res.on("close", cancel);
 
@@ -826,6 +818,7 @@ async function handleChatCompletion(req, res, body) {
     }
   } finally {
     finished = true;
+    runningCancels.delete(cancel);
     req.removeListener('aborted', cancel);
     res.removeListener('close', cancel);
     release();
@@ -849,6 +842,9 @@ const server = http.createServer(async (req, res) => {
         maxConcurrent: MAX_CONCURRENT,
         queueTimeoutSeconds: Math.round(QUEUE_TIMEOUT_MS / 1000),
         timeoutSeconds: Math.round(TIMEOUT_MS / 1000),
+        stallTimeoutSeconds: STALL_TIMEOUT_MS / 1000,
+        processGroupCleanup: true,
+        cleanupDeadlineSeconds: 6,
         execMaxTimeoutMs: EXEC_MAX_TIMEOUT_MS,
         maxPromptBytes: MAX_PROMPT_BYTES,
         reasoningEfforts: EFFORTS,
@@ -892,6 +888,8 @@ server.listen(PORT, HOST, () => {
 
 function shutdown(signal) {
   process.stdout.write(`[antigravity-cli-gateway] received ${signal}, shutting down\n`);
+  shutdownController.abort();
+  for (const cancel of runningCancels) cancel();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 10_000).unref();
 }
