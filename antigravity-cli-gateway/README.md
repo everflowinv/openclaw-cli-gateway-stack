@@ -35,23 +35,33 @@ same subscription-grounded search as a standalone web-search endpoint — see
   completed agent step (not per token) and nothing while tools run. The
   reasoning_content heartbeat mechanism keeps OpenClaw's stuck-session watchdog
   satisfied during tool loops.
-- **Reasoning effort passthrough.** One catalog entry per base model
-  (`gemini-3.8-flash`); OpenClaw's thinking level arrives as OpenAI
-  `reasoning_effort` and maps to agy's `--effort low|medium|high` flag:
-  `none`/`minimal`/`off` → low, `low`/`medium`/`high` pass through,
-  `xhigh`/`max` → high, absent → `AGY_CLI_GATEWAY_DEFAULT_EFFORT` (low). The
+- **Reasoning effort passthrough.** One catalog entry per base model;
+  OpenClaw's thinking level arrives as OpenAI `reasoning_effort`, clamps
+  into the model's catalogued efforts (`none`/`minimal`/`off` → lowest,
+  `xhigh`/`max`/`ultra` → highest, absent →
+  `AGY_CLI_GATEWAY_DEFAULT_EFFORT`), and is sent as agy 1.3.3's canonical
+  suffixed model id (`--model gemini-3.8-flash-high`, no `--effort` flag —
+  the old base-plus-flag form is intermittently rejected upstream). The
   openclaw.json model entry declares
   `compat.supportedReasoningEfforts: [low, medium, high]` (so OpenClaw clamps
   its global `thinkingDefault: xhigh` down to high) plus a model-level
   `thinkingLevelMap` that gives `off`/`minimal` an explicit `low` landing
   spot — without it OpenClaw silently falls back to the global default.
-  Explicitly requesting an unsupported level (`--thinking xhigh`) is rejected
-  client-side by OpenClaw. Legacy suffixed ids like `gemini-3.8-flash-high`
-  are still accepted and pin their effort unless the request overrides it.
-- **Permissions.** agy is spawned with `--dangerously-skip-permissions`
-  (`always-proceed`) because headless permission prompts fail outright. Unlike
-  the claude gateway (which restricts claude to `mcp__openclaw__*` only), agy's
-  built-in tools (file/shell/browser) stay enabled — mitigations: the gateway
+  Inbound suffixed ids like `gemini-3.8-flash-high` are still accepted and
+  pin their effort unless the request overrides it. Note `agy --help`
+  advertises `xhigh|max`, but the live catalog tops out at `high`.
+- **Structured output & error classes.** `response_format`
+  (`json_schema` / `json_object`) passes to agy's `--json-schema`; the
+  reply is the result's `structured_output` (its free-form response text
+  can carry extra `toolAction` fields). agy's structured `AGY_ERROR`
+  stderr line is parsed; quota/rate failures return `429 AGY_CLI_QUOTA`
+  and catalog rejections `502 AGY_CLI_MODEL_REJECTED` so OpenClaw fails
+  over instead of treating them as generic provider errors.
+- **Permissions & tools.** agy is spawned with
+  `--dangerously-skip-permissions` (`always-proceed`) because headless
+  permission prompts fail outright, and its built-in tools stay enabled.
+  Per-request `tools` / `tool_choice` narrow the OpenClaw MCP side through
+  `OPENCLAW_MCP_ENABLED_TOOLS` (no `tools` field = full set). The gateway
   runs agy in the dedicated empty `cwd/` directory in this folder, and MCP
   `exec`/`process` calls remain capped by `OPENCLAW_MCP_LOCAL_TOOL_MAX_TIMEOUT_MS`.
 - **Input schema.** stream-json input lines use agy's shape:
@@ -64,13 +74,14 @@ same subscription-grounded search as a standalone web-search endpoint — see
 
 ## Model catalog
 
-`agy models` lists what the account can use. Currently exposed here: base
-`gemini-3.8-flash` (effort via `--effort`). The catalog also has
-`gemini-3.1-pro` (high/low only), `claude-sonnet-4-6`, `claude-opus-4-6-thinking`,
-and `gpt-oss-120b-medium` if you want to add entries — use the base id in
-`MODELS` (add a suffix-accepting entry only for models with uneven effort
-support like `gemini-3.1-pro`, which lacks medium), and update the provider
-models in openclaw.json.
+`agy models` lists what the account can use (agy 1.3.3, verified
+2026-10-12). Exposed here, with the efforts each catalog entry offers:
+`gemini-3.8-flash`, `claude-opus-5-5` and `claude-sonnet-5-5`
+(low/medium/high), plus `gpt-oss-120b` (medium only — every thinking level
+lands on medium). `gemini-3.1-pro` is no longer recognized by the CLI at
+all and was removed from the gateway and from openclaw.json. To add a
+model, add its base id plus catalogued efforts to `MODELS` in `server.mjs`
+and register the same id in openclaw.json.
 
 ## Service operations
 
@@ -125,6 +136,8 @@ models in openclaw.json.
   warning. Splitting into multiple text blocks does not help. See the
   [verification report](../docs/agy-long-context-2026-09-10.md) before changing
   the limit. The default leaves headroom for CLI-added message framing.
+  Re-verified on agy **1.3.3** (2026-10-12): a ~185KB prompt kept all six
+  random markers; a ~260KB prompt kept only the first four, still SUCCESS.
 - `AGY_CLI_GATEWAY_API_KEY` (optional local bearer token)
 - `AGY_CLI_BIN` (default `$HOME/.local/bin/agy`)
 - `AGY_CLI_GATEWAY_CWD` (default `<this dir>/cwd`)

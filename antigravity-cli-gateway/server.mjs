@@ -14,6 +14,7 @@ import { normalizedAgyUsage as normalizedUsage, rawAgyUsage as rawUsage, context
 
 import { createCliVersionProbe } from "../lib/cli-version.mjs";
 import { createCliProcessCleanup } from "../lib/cli-process-cleanup.mjs";
+import { applyAllowedToolsEnv, parseResponseFormat, readOpenClawToolNames, resolveAllowedTools } from "../lib/openai-request.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // OpenClaw workspace location; agy itself runs in the isolated AGY_CWD.
@@ -40,8 +41,10 @@ const EXEC_MAX_TIMEOUT_MS = numberFromEnv(
 );
 const MAX_BODY_BYTES = numberFromEnv("AGY_CLI_GATEWAY_MAX_BODY_MB", 64, 1, 256) * 1024 * 1024;
 const API_KEY = process.env.AGY_CLI_GATEWAY_API_KEY || "";
-// agy 1.2.0 still truncates the model-facing user message near 192000 UTF-8
-// bytes, then returns SUCCESS/exit 0 without a stream-json or stderr warning.
+// agy still truncates the model-facing user message near 192000 UTF-8
+// bytes (re-verified on 1.3.3, 2026-10-12: 185KB kept all six random
+// markers, 260KB kept only the first four), then returns SUCCESS/exit 0
+// without a stream-json or stderr warning.
 // Its stored generation request contains the internal truncation notice.
 // Multiple text blocks do not avoid it. Keep headroom for CLI-added framing;
 // counting JS characters would allow Chinese/emoji prompts to exceed the cap.
@@ -65,20 +68,26 @@ const STALL_TIMEOUT_MS = numberFromEnv("AGY_CLI_GATEWAY_STALL_SECONDS", 600, 1, 
 const HEARTBEAT_IDLE_MS = numberFromEnv("AGY_CLI_GATEWAY_HEARTBEAT_SECONDS", 120, 0, 3600) * 1000;
 const LIVE_LOG_PREFIX = "[AGYGW]";
 
-// One catalog entry per base model; reasoning effort arrives per-request as
-// OpenAI `reasoning_effort` (OpenClaw thinking level) and maps to agy's
-// `--effort low|medium|high`. Legacy suffixed ids like
+// One catalog entry per base model, mirroring `agy models` on agy 1.3.3
+// (verified 2026-10-12: suffixed ids only; gemini-3.1-pro is no longer
+// recognized at all and was removed). Reasoning effort arrives per-request
+// as OpenAI `reasoning_effort` (OpenClaw thinking level); agy's canonical
+// selection is now the suffixed model id ("gemini-3.8-flash-low"), so the
+// gateway sends `--model <base>-<effort>` and no `--effort` flag — the old
+// base-plus-flag form is intermittently rejected upstream ("--effort is
+// not supported for model"). Inbound suffixed ids like
 // "gemini-3.8-flash-high" are still accepted and pin the effort unless the
-// request overrides it.
+// request overrides it. `agy --help` advertises xhigh/max, but the live
+// catalog only offers the efforts listed per model below.
 const MODELS = new Map([
-  ["gemini-3.8-flash", { id: "gemini-3.8-flash", agyModel: "gemini-3.8-flash", created: 1784851200, input: ["text"], reasoning: true }],
-  ["gemini-3.1-pro-preview", { id: "gemini-3.1-pro-preview", agyModel: "gemini-3.1-pro", created: 1784851200, input: ["text"], reasoning: true }],
-  ["gemini-3.1-pro", { id: "gemini-3.1-pro", agyModel: "gemini-3.1-pro", created: 1784851200, input: ["text"], reasoning: true }],
-  ["claude-opus-5-5", { id: "claude-opus-5-5", agyModel: "claude-opus-5-5", created: 1784851200, input: ["text"], reasoning: true }],
-  ["claude-sonnet-5-5", { id: "claude-sonnet-5-5", agyModel: "claude-sonnet-5-5", created: 1784851200, input: ["text"], reasoning: true }],
+  ["gemini-3.8-flash", { id: "gemini-3.8-flash", agyModel: "gemini-3.8-flash", agyEfforts: ["low", "medium", "high"], created: 1784851200, input: ["text"], reasoning: true }],
+  ["claude-opus-5-5", { id: "claude-opus-5-5", agyModel: "claude-opus-5-5", agyEfforts: ["low", "medium", "high"], created: 1784851200, input: ["text"], reasoning: true }],
+  ["claude-sonnet-5-5", { id: "claude-sonnet-5-5", agyModel: "claude-sonnet-5-5", agyEfforts: ["low", "medium", "high"], created: 1784851200, input: ["text"], reasoning: true }],
+  ["gpt-oss-120b", { id: "gpt-oss-120b", agyModel: "gpt-oss-120b", agyEfforts: ["medium"], created: 1784851200, input: ["text"], reasoning: true }],
 ]);
 const EFFORTS = ["low", "medium", "high"];
 const DEFAULT_EFFORT = process.env.AGY_CLI_GATEWAY_DEFAULT_EFFORT || "low";
+const KNOWN_TOOLS = readOpenClawToolNames(path.join(HERE, "..", "openclaw-mcp-proxy", "tools-schema.json"));
 
 function resolveModelId(requested) {
   if (typeof requested !== 'string') return null;
@@ -92,20 +101,21 @@ function resolveModelId(requested) {
   return null;
 }
 
-// OpenClaw levels beyond agy's three clamp upward (xhigh/max -> high) or
-// downward to the cheapest real effort (none/minimal/off -> low); missing or
-// absent values fall back to the pinned suffix or DEFAULT_EFFORT; unknowns fail.
+// OpenClaw levels clamp into the model's catalogued efforts: upward
+// (xhigh/max/ultra -> the model's highest) or downward (none/minimal/off
+// -> the model's lowest); an exact level the model lacks lands on the
+// nearest available one. Missing values fall back to the pinned suffix or
+// DEFAULT_EFFORT; unknowns fail.
 function mapEffort(requested, fallbackEffort, modelMeta) {
   const value = requested == null || requested === "" ? (fallbackEffort || DEFAULT_EFFORT) : String(requested).toLowerCase();
   if (![...EFFORTS, "none", "minimal", "off", "xhigh", "max", "ultra"].includes(value)) throw requestError(`Unsupported reasoning_effort '${requested}'`);
-  if (modelMeta?.agyModel === "gemini-3.1-pro") {
-    if (value === "high" || value === "xhigh" || value === "max" || value === "ultra") return "high";
-    return "low";
-  }
-  if (EFFORTS.includes(value)) return value;
-  if (value === "none" || value === "minimal" || value === "off") return "low";
-  if (value === "xhigh" || value === "max" || value === "ultra") return "high";
-  return fallbackEffort || DEFAULT_EFFORT;
+  const available = modelMeta?.agyEfforts?.length ? modelMeta.agyEfforts : EFFORTS;
+  if (value === "none" || value === "minimal" || value === "off") return available[0];
+  if (value === "xhigh" || value === "max" || value === "ultra") return available.at(-1);
+  if (available.includes(value)) return value;
+  const rank = EFFORTS.indexOf(value);
+  return available.reduce((best, effort) =>
+    Math.abs(EFFORTS.indexOf(effort) - rank) < Math.abs(EFFORTS.indexOf(best) - rank) ? effort : best);
 }
 
 let activeRequests = 0;
@@ -342,13 +352,19 @@ function translateRequest(body) {
   }
 
   const modelMeta = MODELS.get(resolvedModel.base);
+  const effort = mapEffort(body.reasoning_effort ?? body.reasoning?.effort, resolvedModel.suffixEffort, modelMeta);
+  const baseModel = modelMeta?.agyModel || resolvedModel.base;
+  const jsonSchema = parseResponseFormat(body);
   return {
-    model: modelMeta?.agyModel || resolvedModel.base,
+    model: baseModel,
+    agyModelId: `${baseModel}-${effort}`,
     clientModel: resolvedModel.base,
-    effort: mapEffort(body.reasoning_effort ?? body.reasoning?.effort, resolvedModel.suffixEffort, modelMeta),
+    effort,
     requestedEffort: body.reasoning_effort ?? body.reasoning?.effort ?? null,
     prompt,
     requesterSessionKey: extractRequesterSessionKey(systemParts.join("\n\n")),
+    allowedTools: resolveAllowedTools(body, KNOWN_TOOLS),
+    jsonSchema: jsonSchema ? JSON.stringify(jsonSchema) : null,
     stream: body.stream === true,
     includeUsage: body.stream_options?.include_usage === true,
   };
@@ -365,13 +381,14 @@ function extractRequesterSessionKey(prompt) {
   return match?.[1]?.replace(/[.!?。！？]+$/, "");
 }
 
-function cliEnvironment(requesterSessionKey) {
+function cliEnvironment(requesterSessionKey, allowedTools) {
   const env = { ...process.env };
   env.OPENCLAW_MCP_LOCAL_TOOL_MAX_TIMEOUT_MS = String(
     process.env.OPENCLAW_MCP_LOCAL_TOOL_MAX_TIMEOUT_MS || EXEC_MAX_TIMEOUT_MS,
   );
   if (requesterSessionKey) env.OPENCLAW_REQUESTER_SESSION_KEY = requesterSessionKey;
   else delete env.OPENCLAW_REQUESTER_SESSION_KEY;
+  applyAllowedToolsEnv(env, allowedTools);
   return env;
 }
 
@@ -379,16 +396,16 @@ function createAgyProcess(job) {
   const args = [
     "--input-format", "stream-json",
     "--output-format", "stream-json",
-    "--model", job.model,
-    "--effort", job.effort,
+    "--model", job.agyModelId,
     "--dangerously-skip-permissions",
     "--disable-slash-commands",
     "--print-timeout", `${Math.ceil(TIMEOUT_MS / 1000) + 60}s`,
   ];
+  if (job.jsonSchema) args.push("--json-schema", job.jsonSchema);
   const child = spawn(AGY_BIN, args, {
     detached: true,
     cwd: AGY_CWD,
-    env: cliEnvironment(job.requesterSessionKey),
+    env: cliEnvironment(job.requesterSessionKey, job.allowedTools),
     stdio: ["pipe", "pipe", "pipe"],
   });
   // agy can exit before draining stdin (auth/network failure inside the
@@ -410,6 +427,46 @@ function sanitizeError(text) {
     .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s]+/gi, "$1[REDACTED]")
     .replace(/(api[_-]?key\s*[:=]\s*)[^\s]+/gi, "$1[REDACTED]")
     .slice(-6000);
+}
+
+// agy 1.2.6+ prints a structured `AGY_ERROR: {...}` line on stderr for
+// headless failures (canonical status, retryability). Parse it when present
+// so quota/rate failures surface to OpenClaw as 429 (fast failover) instead
+// of a generic 502; the original message text is always preserved.
+function parseAgyError(stderrText) {
+  const match = String(stderrText || "").match(/AGY_ERROR:\s*(\{[^\n]*\})/);
+  if (!match) return null;
+  try { return JSON.parse(match[1]); } catch { return null; }
+}
+
+function cliFailure(message, resultEvent, stderrText) {
+  const text = sanitizeError(message) || "Antigravity CLI failed";
+  const structured = parseAgyError(stderrText);
+  const haystack = `${text} ${JSON.stringify(structured || {})}`;
+  const error = new Error(text);
+  if (/quota|rate.?limit|usage.?limit|too many requests|resource.?exhausted|\b429\b/i.test(haystack)) {
+    error.code = "AGY_CLI_QUOTA";
+    error.statusCode = 429;
+  } else if (/invalid model selection|not recognized as a known model/i.test(haystack)) {
+    error.code = "AGY_CLI_MODEL_REJECTED";
+    error.statusCode = 502;
+  } else {
+    error.code = "AGY_CLI_ERROR";
+    error.statusCode = 502;
+  }
+  if (structured) error.agyError = structured;
+  error.resultEvent = resultEvent;
+  return error;
+}
+
+// With --json-schema, agy's free-form response text can carry extra
+// toolAction/toolSummary fields; structured_output is the clean,
+// schema-shaped value and always wins when a schema was requested.
+function finalResponseText(job, result) {
+  if (job.jsonSchema && result?.structured_output !== undefined) {
+    return JSON.stringify(result.structured_output);
+  }
+  return typeof result?.response === "string" ? result.response : "";
 }
 
 // agy tool steps carry tool_info {name, parameters, output}; MCP calls arrive
@@ -541,10 +598,7 @@ function runAgy(job, callbacks) {
             finish(null, resultEvent);
             reapChild();
           } else {
-            const error = new Error(sanitizeError(resultEvent.error) || `agy result status: ${resultEvent.status || 'missing'}`);
-            error.code = 'AGY_CLI_ERROR';
-            error.resultEvent = resultEvent;
-            finish(error);
+            finish(cliFailure(resultEvent.error || `agy result status: ${resultEvent.status || 'missing'}`, resultEvent, stderr));
             reapChild();
           }
         }
@@ -564,10 +618,7 @@ function runAgy(job, callbacks) {
             : stderr
               || `agy exited with code ${code ?? "unknown"}${signal ? ` (${signal})` : ""}`,
       );
-      const error = new Error(detail || `agy result status: ${resultEvent?.status || "missing"}`);
-      error.code = "AGY_CLI_ERROR";
-      error.resultEvent = resultEvent;
-      return finish(error);
+      return finish(cliFailure(detail || `agy result status: ${resultEvent?.status || "missing"}`, resultEvent, stderr));
     });
 
     callbacks.onChild?.(child, () => cleanup.terminate(failure('Request cancelled', 'AGY_CLI_CANCELLED', 499)));
@@ -636,9 +687,12 @@ async function handleChatCompletion(req, res, body) {
   writeLiveLog(requestId, "start", {
     requestUuid,
     model: job.model,
+    agyModelId: job.agyModelId,
     effort: job.effort,
     requestedEffort: job.requestedEffort,
     session: job.requesterSessionKey || null,
+    tools: job.allowedTools === null ? "all" : job.allowedTools,
+    structuredOutput: Boolean(job.jsonSchema),
     stream: job.stream,
     promptChars: job.prompt.length,
     queued: waiters.length,
@@ -773,14 +827,18 @@ async function handleChatCompletion(req, res, body) {
           onText: (text) => {
             logCallbacks.onText(text);
             if (!text || res.destroyed) return;
+            // Structured output is delivered once, whole, from the verified
+            // final result below; step text around it is not schema-clean.
+            if (job.jsonSchema) return;
             emittedText += text;
             sse(streamChunk(id, created, responseModel, { content: text }));
           },
         });
-        if (!emittedText && typeof result.response === "string" && result.response) {
-          emittedText = result.response;
-          logCallbacks.onText(result.response);
-          sse(streamChunk(id, created, responseModel, { content: result.response }));
+        const finalText = finalResponseText(job, result);
+        if (!emittedText && finalText) {
+          emittedText = finalText;
+          logCallbacks.onText(finalText);
+          sse(streamChunk(id, created, responseModel, { content: finalText }));
         }
         sse(streamChunk(id, created, responseModel, {}, "stop"));
         if (job.includeUsage) {
@@ -798,6 +856,7 @@ async function handleChatCompletion(req, res, body) {
     } else {
       try {
         const result = await runAgy(job, logCallbacks);
+        const finalText = finalResponseText(job, result);
         sendJson(res, 200, {
           id,
           object: "chat.completion",
@@ -805,12 +864,12 @@ async function handleChatCompletion(req, res, body) {
           model: responseModel,
           choices: [{
             index: 0,
-            message: { role: "assistant", content: result.response || "" },
+            message: { role: "assistant", content: finalText },
             finish_reason: "stop",
           }],
           usage: contextAgyUsage(result.firstCallUsage, result.usage),
         });
-        logDone(result, result.response ? {} : { emptyResponse: true });
+        logDone(result, finalText ? {} : { emptyResponse: true });
       } catch (error) {
         logError(error);
         throw error;
@@ -849,13 +908,20 @@ const server = http.createServer(async (req, res) => {
         maxPromptBytes: MAX_PROMPT_BYTES,
         reasoningEfforts: EFFORTS,
         outputTokenLimitEnforced: false,
+        structuredOutput: true,
+        permissionMode: "dangerously-skip-permissions",
         multimodal: { input: ["text"] },
       });
     }
     if (req.method === "GET" && url.pathname === "/v1/models") {
       return sendJson(res, 200, {
         object: "list",
-        data: [...MODELS.values()].map((model) => ({ ...model, object: "model", owned_by: "google-via-antigravity-cli" })),
+        data: [...MODELS.values()].map((model) => ({
+          id: model.id, object: "model", created: model.created,
+          owned_by: "google-via-antigravity-cli",
+          input: model.input, reasoning: model.reasoning,
+          reasoning_efforts: model.agyEfforts,
+        })),
       });
     }
     if (req.method === "POST" && url.pathname === "/v1/chat/completions") {

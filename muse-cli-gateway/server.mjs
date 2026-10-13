@@ -9,12 +9,17 @@ import { createCliVersionProbe } from '../lib/cli-version.mjs';
 import { fileURLToPath } from 'node:url';
 import { MODEL, EFFORTS, failure, readToolNames, translateRequest } from './request.mjs';
 import { runMuse, sanitizeError, subscriptionStatus } from './process.mjs';
-import { MODELS, SAFE_CONTEXT, MAX_PROMPT_BYTES } from './catalog.mjs';
+import { MODELS, SAFE_CONTEXT, MAX_PROMPT_BYTES, MAX_OUTPUT_TOKENS } from './catalog.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 function envNumber(name, fallback, min, max) {
   const value = Number(process.env[name] ?? fallback);
   if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  return value;
+}
+function envFraction(name, fallback) {
+  const value = Number(process.env[name] ?? fallback);
+  if (!Number.isFinite(value) || value <= 0 || value > 1) throw new Error(`${name} must be a fraction in (0, 1]`);
   return value;
 }
 const HOME_DIR = os.homedir();
@@ -36,7 +41,13 @@ const config = {
   exitGraceMs: envNumber('MUSE_CLI_GATEWAY_EXIT_GRACE_MS', 15000, 100, 60000),
   execTimeoutMs: envNumber('MUSE_CLI_GATEWAY_EXEC_MAX_TIMEOUT_MS', 600000, 1000, 1800000),
   maxSteps: envNumber('MUSE_CLI_GATEWAY_MAX_MODEL_STEPS', 100, 1, 500),
+  compactionSoftThreshold: envFraction('MUSE_CLI_GATEWAY_COMPACTION_SOFT_THRESHOLD', 0.9),
+  compactionHardThreshold: envFraction('MUSE_CLI_GATEWAY_COMPACTION_HARD_THRESHOLD', 0.98),
+  maxToolOutputBytes: envNumber('MUSE_CLI_GATEWAY_MAX_TOOL_OUTPUT_BYTES', 262144, 9, 16777216),
 };
+if (config.compactionSoftThreshold >= config.compactionHardThreshold) {
+  throw new Error('MUSE_CLI_GATEWAY_COMPACTION_SOFT_THRESHOLD must be below the hard threshold');
+}
 const knownTools = readToolNames(path.join(path.dirname(config.proxyPath), 'tools-schema.json'));
 const getCliVersion = createCliVersionProbe(config.cliBin);
 const cliVersion = await getCliVersion();
@@ -67,7 +78,17 @@ function json(res, status, data) {
 function errorBody(error) { return { error: { message: sanitizeError(error.message), type: 'muse_cli_error', code: error.code ?? 'MUSE_ERROR', param: null } }; }
 async function readBody(req) {
   const chunks = []; let length = 0;
-  for await (const chunk of req.iterator({ destroyOnReturn: false })) { length += chunk.length; if (length > MAX_BODY) { req.resume(); throw failure('Request exceeds body limit', 'MUSE_BODY_LIMIT', 413); } chunks.push(chunk); }
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+    length += chunk.length;
+    if (length > MAX_BODY) break;
+    chunks.push(chunk);
+  }
+  if (length > MAX_BODY) {
+    // Resume only after iterator cleanup; otherwise it can pause the request
+    // again and strand the remaining body on a reused keep-alive connection.
+    req.resume();
+    throw failure('Request exceeds body limit', 'MUSE_BODY_LIMIT', 413);
+  }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
   catch { throw failure('Request body must be valid JSON'); }
 }
@@ -86,7 +107,7 @@ async function chat(req, res, body) {
   try {
     slot = await acquire(controller.signal);
     if (controller.signal.aborted) throw failure('Request cancelled', 'MUSE_CANCELLED', 499);
-    log(requestId, 'start', { model: job.model, effort: job.effort, session: job.requesterSessionKey ?? null, tools: job.allowedTools, imageCount: job.images.length, promptBytes: Buffer.byteLength(job.prompt), stream: job.stream, auth: 'official-muse-device-login', contextWindow: SAFE_CONTEXT, maxPromptBytes: MAX_PROMPT, logContent: LOG_CONTENT });
+    log(requestId, 'start', { model: job.model, effort: job.effort, session: job.requesterSessionKey ?? null, tools: job.toolsRestricted ? job.allowedTools : 'all', structuredOutput: Boolean(job.outputSchema), imageCount: job.images.length, promptBytes: Buffer.byteLength(job.prompt), stream: job.stream, auth: 'official-muse-device-login', contextWindow: SAFE_CONTEXT, maxPromptBytes: MAX_PROMPT, logContent: LOG_CONTENT });
     if (job.stream) {
       res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-accel-buffering': 'no' });
       sse(res, chunk({ role: 'assistant', content: '' }));
@@ -130,9 +151,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/health') {
       const auth = subscriptionStatus(config.authPath);
       const cliVersion = await getCliVersion();
-      return json(res, cliVersion && auth.ready ? 200 : 503, { status: cliVersion && auth.ready ? 'ok' : 'degraded', cliVersion, auth, activeRequests: active, queuedRequests: waiters.length, maxConcurrent: LIMIT, queueTimeoutSeconds: QUEUE_MS / 1000, timeoutSeconds: config.timeoutMs / 1000, stallTimeoutSeconds: config.stallMs / 1000, processGroupCleanup: true, cleanupDeadlineSeconds: 3, outputTokenLimitEnforced: false, models: [...MODELS.keys()], input: ['text', 'image'], reasoningEfforts: EFFORTS, usageAvailable: true, usageSource: 'reported-session-journal', contextWindow: SAFE_CONTEXT, maxPromptBytes: MAX_PROMPT, logContent: LOG_CONTENT });
+      return json(res, cliVersion && auth.ready ? 200 : 503, { status: cliVersion && auth.ready ? 'ok' : 'degraded', cliVersion, auth, activeRequests: active, queuedRequests: waiters.length, maxConcurrent: LIMIT, queueTimeoutSeconds: QUEUE_MS / 1000, timeoutSeconds: config.timeoutMs / 1000, stallTimeoutSeconds: config.stallMs / 1000, processGroupCleanup: true, cleanupDeadlineSeconds: 3, outputTokenLimitEnforced: false, structuredOutput: true, permissionMode: 'yolo', compactionSoftThreshold: config.compactionSoftThreshold, compactionHardThreshold: config.compactionHardThreshold, maxToolOutputBytes: config.maxToolOutputBytes, models: [...MODELS.keys()], input: ['text', 'image'], reasoningEfforts: EFFORTS, usageAvailable: true, usageSource: 'reported-session-journal', contextWindow: SAFE_CONTEXT, maxPromptBytes: MAX_PROMPT, logContent: LOG_CONTENT });
     }
-    if (req.method === 'GET' && url.pathname === '/v1/models') return json(res, 200, { object: 'list', data: [...MODELS.values()].map(m => ({ id: m.id, object: 'model', owned_by: 'meta-via-official-muse-code', context_window: SAFE_CONTEXT, max_output_tokens: 128000, pricing: { input: m.input, cached_input: m.cacheRead, output: m.output, unit: 'USD/1M tokens', basis: 'API list-price estimate' } })) });
+    if (req.method === 'GET' && url.pathname === '/v1/models') return json(res, 200, { object: 'list', data: [...MODELS.values()].map(m => ({ id: m.id, object: 'model', owned_by: 'meta-via-official-muse-code', context_window: SAFE_CONTEXT, max_output_tokens: MAX_OUTPUT_TOKENS, pricing: Number.isFinite(m.input) ? { input: m.input, cached_input: m.cacheRead, output: m.output, unit: 'USD/1M tokens', basis: 'API list-price estimate' } : null, pricing_status: Number.isFinite(m.input) ? 'published-api-list-price' : 'subscription-only-no-token-list-price' })) });
     if (req.method === 'POST' && url.pathname === '/v1/chat/completions') {
       if (API_KEY && req.headers.authorization !== `Bearer ${API_KEY}`) return json(res, 401, { error: { message: 'Invalid gateway credential' } });
       return await chat(req, res, await readBody(req));

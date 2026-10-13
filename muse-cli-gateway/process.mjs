@@ -4,6 +4,7 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { failure, MODEL } from './request.mjs';
+import { MODELS } from './catalog.mjs';
 import { collectUsage } from './usage.mjs';
 import { MuseDetails } from './details.mjs';
 import { createCliProcessCleanup } from '../lib/cli-process-cleanup.mjs';
@@ -24,7 +25,7 @@ export function sanitizeError(value) {
 // This consumes only the foreground run's authoritative terminal record. A CLI
 // exit code of zero or a reminder/subagent completion is not a successful turn.
 export class MuseEvents {
-  constructor(callbacks = {}, expectedModel = MODEL) { this.callbacks = callbacks; this.expectedModel = expectedModel; this.runId = null; this.modelSeen = false; this.text = ''; this.terminal = null; this.sessionId = null; }
+  constructor(callbacks = {}, expectedModel = MODEL, { promptBytes = 0, allowGenericContextFallback = false } = {}) { this.callbacks = callbacks; this.expectedModel = expectedModel; this.promptBytes = promptBytes; this.allowGenericContextFallback = allowGenericContextFallback; this.runId = null; this.modelSeen = false; this.text = ''; this.terminal = null; this.sessionId = null; }
   accept(event) {
     const p = event?.payload;
     if (!p || typeof p !== 'object') return;
@@ -60,6 +61,21 @@ export class MuseEvents {
     if (!this.modelSeen || !this.terminal) throw failure('Muse exited without a verified model and terminal result', 'MUSE_INCOMPLETE_TURN', 502);
     if (this.terminal.terminal !== 'completed' || exitCode !== 0) {
       const reason = sanitizeError(this.terminal.reason ?? `Muse turn ${this.terminal.terminal}; CLI exit ${exitCode}`);
+      // The CLI estimator hard-rejects oversize first inputs ("context
+      // compaction replacement still exceeds the hard threshold"). That is
+      // a context-overflow for the caller, like the gateway's own 413s —
+      // not a generic turn failure.
+      if (/hard threshold|context compaction|prompt is too long|context.{0,40}(too long|exceed|maximum|limit)/i.test(reason)) {
+        throw failure(reason, 'MUSE_CONTEXT_LIMIT', 413);
+      }
+      // The 1.4.7 dense-text probe returned this exact generic 400, without
+      // an explicit overflow code. Keep this compatibility heuristic narrow:
+      // only large text-only, tool-free, schema-free requests qualify. Schema,
+      // image and other parameter errors must not masquerade as overflow.
+      const genericInvalidParameters = /^API error 400(?: \[request_id=[^\]]+\])?: The request contains invalid parameters\.(?: Check the request body for any errors or inconsistencies\.)? \(invalid_request_error\)$/i.test(reason);
+      if (this.allowGenericContextFallback && this.promptBytes >= 1_000_000 && genericInvalidParameters) {
+        throw failure(`Prompt may exceed the Muse context limit (large-text provider rejection): ${reason}`, 'MUSE_CONTEXT_LIMIT', 413);
+      }
       const quota = /quota|rate.?limit|usage.?limit|too many|429/i.test(reason);
       throw failure(reason, quota ? 'MUSE_SUBSCRIPTION_LIMIT' : 'MUSE_TURN_FAILED', quota ? 429 : 502);
     }
@@ -84,17 +100,40 @@ export async function runMuse(job, config, { signal, onText, onEvent, onActivity
   fs.symlinkSync(config.authPath, path.join(cfgDir, 'auth.json'));
   const proxyEnv = { OPENCLAW_WORKSPACE: config.workspace, OPENCLAW_MCP_LOCAL_TOOL_MAX_TIMEOUT_MS: String(config.execTimeoutMs) };
   if (job.requesterSessionKey) proxyEnv.OPENCLAW_REQUESTER_SESSION_KEY = job.requesterSessionKey;
-  const mcp = job.allowedTools.length ? { openclaw: {
+  // Unrestricted requests (no tools field) get the proxy's full set (no
+  // ENABLED_TOOLS); an explicit list narrows it; an explicitly empty list
+  // configures no MCP server and disables the native tool lanes too.
+  const toolsDisabled = job.toolsRestricted && job.allowedTools.length === 0;
+  const mcp = toolsDisabled ? {} : { openclaw: {
     transport: 'stdio', command: process.execPath, args: [config.proxyPath], mode: 'required',
-    env: { ...proxyEnv, OPENCLAW_MCP_ENABLED_TOOLS: job.allowedTools.join(',') },
-  } } : {};
+    env: job.toolsRestricted ? { ...proxyEnv, OPENCLAW_MCP_ENABLED_TOOLS: job.allowedTools.join(',') } : { ...proxyEnv },
+  } };
   fs.writeFileSync(path.join(cfgDir, 'settings.json'), JSON.stringify({ schema_version: 1, provider: 'meta', model: job.model, mcp_servers: mcp }), { mode: 0o600 });
   const promptPath = path.join(dir, 'prompt.txt');
   fs.writeFileSync(promptPath, job.prompt, { mode: 0o600 });
-  const args = ['exec', '--json', '--model', job.model, '--reasoning-effort', job.effort,
+  // Maximum-permission posture (--yolo: approval off, sandbox off, workspace
+  // trusted), matching the sibling gateways. Reminder agents are disabled:
+  // in a throwaway provider session they only burn background tokens.
+  // Compaction thresholds are pinned high so the first model input (bounded
+  // by the gateway's byte cap, far below the native 1,007,997-token limit)
+  // is never summarized before inference; journal verification below still
+  // fails closed if that ever changes. Tool outputs are capped so one huge
+  // MCP result cannot blow the run's context in a single step.
+  const args = ['exec', '--json', '--model', job.model,
+    '--contributor-mode', MODELS.get(job.model)?.contributor === true ? 'on' : 'off',
+    '--reasoning-effort', job.effort,
     '--workspace', cwd, '--prompt-file', promptPath, '--no-foreign-personal-context',
-    '--disable-write', '--disable-shell', '--disable-web-tools', '--approval-mode', 'never',
+    '--yolo', '--disable-reminders',
+    '--context-compaction-soft-threshold', String(config.compactionSoftThreshold ?? 0.9),
+    '--context-compaction-hard-threshold', String(config.compactionHardThreshold ?? 0.98),
+    '--max-tool-output-bytes', String(config.maxToolOutputBytes ?? 262144),
     '--max-model-steps', String(config.maxSteps)];
+  if (toolsDisabled) args.push('--disable-write', '--disable-shell', '--disable-web-tools');
+  if (job.outputSchema) {
+    const schemaPath = path.join(dir, 'output-schema.json');
+    fs.writeFileSync(schemaPath, JSON.stringify(job.outputSchema), { mode: 0o600 });
+    args.push('--output-schema', schemaPath);
+  }
   for (const [index, image] of job.images.entries()) {
     const imagePath = path.join(dir, `image-${index + 1}.${image.extension}`);
     fs.writeFileSync(imagePath, image.bytes, { mode: 0o600 });
@@ -130,7 +169,10 @@ export async function runMuse(job, config, { signal, onText, onEvent, onActivity
         // but never reinterpret a killed/incomplete request as success.
         lingerTimer = setTimeout(() => stop(failure('Muse did not exit after its terminal result', 'MUSE_EXIT_TIMEOUT', 502)), config.exitGraceMs);
         lingerTimer.unref();
-      } }, job.model);
+      } }, job.model, {
+        promptBytes: Buffer.byteLength(job.prompt),
+        allowGenericContextFallback: toolsDisabled && !job.outputSchema && job.images.length === 0,
+      });
       const details = new MuseDetails(path.join(dataDir, 'muse/sessions'), onEvent);
       let detailWarning = false;
       const pollDetails = () => {

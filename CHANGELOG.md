@@ -1,5 +1,55 @@
 # Changelog
 
+## 2026.10.13
+
+- Finish the interrupted Muse bridge update: raise the complete prompt's
+  UTF-8 cap from 1,400,000 to 1,900,000 bytes after four-model marker and
+  journal-preservation probes; keep the 384,000-token safe context.
+- Return 413 for explicit Muse context/compaction overflow. Limit the
+  generic invalid-parameters 400 fallback to the observed large-text,
+  tool-free, schema-free, image-free case; preserve other parameter errors.
+- Add exact byte-boundary, Unicode, HTTP/SSE error and parameter-error
+  regressions; retain sanitized live-probe evidence in
+  `docs/muse-context-probes-2026-10-13.json`.
+- Drain oversized HTTP request bodies after iterator cleanup so a 413
+  does not strand the next request on the same keep-alive connection.
+
+## 2026.10.12
+
+- Re-verify the bridge against Claude Code 2.1.296, Antigravity CLI 1.3.3
+  and Muse Code 1.4.7; see `docs/cli-bridge-update-2026-10-12.md`.
+- Antigravity: select models by agy's canonical suffixed ids
+  (`--model <base>-<effort>`, no `--effort` flag; the old form is
+  intermittently rejected upstream). Remove `gemini-3.1-pro` (no longer
+  recognized by the CLI) from the gateway and OpenClaw registration; add
+  `gpt-oss-120b` (medium only). Web-search service uses the same suffixed
+  selection. The 190,000-byte prompt guard was re-probed on 1.3.3 and stays.
+- All lanes present one provider surface: `response_format` passes to each
+  CLI's native structured output and returns its `structured_output`;
+  per-request `tools`/`tool_choice` narrow the OpenClaw MCP tool set
+  (shared `lib/openai-request.mjs`); quota/rate failures return 429 and
+  Claude context overflow 413 with the CLI message verbatim; agy's
+  structured `AGY_ERROR` line is parsed.
+- Maximum-permission posture everywhere, by operator decision: Claude and
+  AGY `--dangerously-skip-permissions`, Muse `--yolo`. Claude keeps its
+  full native tool set on unrestricted requests (an explicit `tools` list
+  still bounds the run to the MCP bridge; `tool_choice: "none"` disables
+  all tools). Muse keeps native tools in its private workspace.
+- Claude: pin `--autocompact` (default the full 1M window) so the CLI
+  cannot silently compact mid-run; remove the retired isolated Opus 5.5
+  lane (4572 template and `CLAUDE_CLI_GATEWAY_MODEL_ALLOWLIST`) — every
+  Claude model shares the single 4568 gateway.
+- Muse: pin context-compaction thresholds (soft 0.9 / hard 0.98) and a
+  per-tool output cap; disable reminder agents; pass the native
+  none..ultra effort range through; an absent `tools` field now means the
+  proxy's full set, matching the sibling gateways.
+- Deployment: `install.sh` now defaults to the deployed `ai.openclaw.*`
+  labels (re-running updates in place instead of duplicating services),
+  installs the Muse lane from a new template that matches
+  `muse-cli-gateway/install.py`, and checks port 4571. Point agy's MCP
+  bridge at the managed Node 26 like every other client. The usage
+  collector's workspace path is now a symlink to this repo's copy.
+
 ## 2026.09.10
 
 - Repair usage accounting: deduplicate Codex status counters and Claude message

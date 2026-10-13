@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { collectUsage, normalizeUsage } from './usage.mjs';
-import { MODEL, CONTRIBUTOR_MODEL, listPriceCost } from './catalog.mjs';
+import { MODEL, CONTRIBUTOR_MODEL, WONDER_MODEL, WONDER_FULL_MODEL, listPriceCost } from './catalog.mjs';
 
 test('Meta cache and reasoning remain subsets; malformed measurements are not zero-filled', () => {
   const u = normalizeUsage({ input_tokens: 18442, output_tokens: 33, cached_tokens: 12529, reasoning_tokens: 16 });
@@ -20,6 +20,8 @@ test('list-price estimates follow each model, with no long-context multiplier', 
   const u = normalizeUsage({ input_tokens: 1000000, output_tokens: 1000000, cached_tokens: 500000, reasoning_tokens: 700000 });
   assert.equal(listPriceCost(MODEL, u), 4.95);
   assert.ok(Math.abs(listPriceCost(CONTRIBUTOR_MODEL, u) - .251) < 1e-12);
+  assert.equal(listPriceCost(WONDER_MODEL, u), 22.1);
+  assert.equal(listPriceCost(WONDER_FULL_MODEL, u), null);
   assert.equal(listPriceCost('unknown', u), null);
 });
 test('journal mirror duplicates and attribution aliases do not double count; observers stay attributable', () => {

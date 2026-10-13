@@ -39,6 +39,7 @@ the official CLIs behind a tiny local gateway means:
 - the CLI's own agent loop (and its tool calls through your OpenClaw MCP
   bridge) execute the turn, so OpenClaw gets finished answers,
 - any OpenClaw feature that takes a provider works: thinking levels,
+  structured output (`response_format`), per-request tool lists,
   fallback chains, subagents, compaction, etc.
 
 ## Components
@@ -47,7 +48,7 @@ the official CLIs behind a tiny local gateway means:
 |---|---|---|
 | `claude-cli-gateway/` | OpenAI-compatible façade over `claude -p --stream-json`; concurrency/queue/timeout limits; watchdog heartbeats for OpenClaw's stuck-session detector | 4568 |
 | `antigravity-cli-gateway/` | Same idea over `agy` headless print mode; reasoning-effort passthrough (`reasoning_effort` → `--effort`), stall watchdog, verified terminal status (interrupted prose is diagnostic, not a completed reply) | 4569 |
-| `muse-cli-gateway/` | Official Muse Code device-login path for Muse Spark 1.3; per-request MCP policy, private CLI config, terminal-verified replies and cancellation | 4571 |
+| `muse-cli-gateway/` | Official Muse Code device-login path for Muse Spark 1.3 / Contributor and Wonder 1.0 / Full; per-request MCP policy, private CLI config, terminal-verified replies and cancellation | 4571 |
 | `antigravity-cli-gateway/websearch-service.mjs` + `openclaw-plugin/` | Gemini-provider-shaped web_search over agy's subscription-grounded `search_web` (minimal `excludeDefaultComponents` agent, ~5k input tokens/search); registered in OpenClaw as the `antigravity` web-search provider | 4570 |
 | `live-log-viewer/` | Python SSE server + one HTML page with a tab per gateway: per-request blocks, thinking/text, tool calls with arguments/outputs, regex + session filters, follow mode, download | 8765 |
 | `openclaw-mcp-proxy/` | The OpenClaw MCP bridge: stdio server exposing OpenClaw's tools (exec/read/write/…) to claude, agy, codex and Claude Code; unit + integration tests, regenerable tool schema | — |
@@ -60,7 +61,7 @@ Each gateway has its own README with configuration, env vars, and
 troubleshooting. Since 2026-09-11 this repo **is the runtime location**: the
 launchd services (`ai.openclaw.claude-cli-gateway`,
 `ai.openclaw.antigravity-cli-gateway`, `ai.openclaw.antigravity-websearch`,
-`com.openclaw.log-viewer`) run straight from this checkout and OpenClaw loads
+`ai.openclaw.muse-cli-gateway`, `com.openclaw.log-viewer`) run straight from this checkout and OpenClaw loads
 the web-search plugin from `antigravity-cli-gateway/openclaw-plugin/`, so there
 is no deployed duplicate to keep in sync. Keep `main` clean — develop in
 worktrees and restart the service after merging. `claude-cli-gateway/mcp.json`
@@ -85,10 +86,14 @@ stays gitignored and machine-local. The pre-migration
   own `~/.claude.json` global `mcpServers` entry.
 
 The 2026-09-10 source snapshot was validated with Node.js **26.8.2**, Claude
-Code **2.1.263**, and Antigravity CLI **1.2.0**. These are the installed versions
-used for validation, not a claim about the vendors' latest releases. CLI
-binaries, account credentials, local MCP configuration, and runtime logs are
-not included. See [CHANGELOG.md](CHANGELOG.md) for this snapshot's changes.
+Code **2.1.263**, and Antigravity CLI **1.2.0**. The current deployment was
+re-verified on 2026-10-12 with Claude Code **2.1.296**, Antigravity CLI
+**1.3.3**, and Muse Code **1.4.7** — see
+[the October 12 bridge update](docs/cli-bridge-update-2026-10-12.md). These
+are the installed versions used for validation, not a claim about the
+vendors' latest releases. CLI binaries, account credentials, local MCP
+configuration, and runtime logs are not included. See
+[CHANGELOG.md](CHANGELOG.md) for this snapshot's changes.
 
 ## Install
 
@@ -103,7 +108,7 @@ cp claude-cli-gateway/mcp.json.example claude-cli-gateway/mcp.json
 # 2. register the same bridge in agy and codex (and Claude Code globals)
 agy mcp add openclaw node -- <repo>/openclaw-mcp-proxy/server.js
 
-# 3. install + start the three launchd services (renders templates)
+# 3. install + start the launchd services (renders templates)
 bash launchd/install.sh
 
 # 4. register providers in OpenClaw (~/.openclaw/openclaw.json)
@@ -187,9 +192,14 @@ node --test 'openclaw-mcp-proxy/'.*.test.js   # or: cd openclaw-mcp-proxy && nod
 - Everything binds to **127.0.0.1** only. Do not port-forward.
 - The log viewer dumps prompts/tool traffic; it rejects Tailscale Funnel
   (public) requests by header and sets `X-Robots-Tag` noindex.
-- `agy` runs with `--dangerously-skip-permissions` (headless permission
-  prompts fail outright); the gateway confines it to an empty working
-  directory and MCP `exec` calls stay capped by
+- **All downstream CLIs run at maximum permission** (Claude/AGY
+  `--dangerously-skip-permissions`, Muse `--yolo`): headless permission
+  prompts can only hang or deny. This is a deliberate posture for a local,
+  single-operator gateway — a compromised prompt can execute host actions
+  through the native CLI tools, not only through the OpenClaw MCP bridge.
+  Per-request `tools` / `tool_choice` still bound the tool surface, `agy`
+  and `muse` run in empty private working directories, and MCP
+  `exec`/`process` calls stay capped by
   `OPENCLAW_MCP_LOCAL_TOOL_MAX_TIMEOUT_MS`. Review before deploying.
 - Optional bearer auth per gateway: `*_GATEWAY_API_KEY`.
 
@@ -199,8 +209,9 @@ node --test 'openclaw-mcp-proxy/'.*.test.js   # or: cd openclaw-mcp-proxy && nod
 curl -s http://127.0.0.1:4568/health          # claude gateway
 curl -s http://127.0.0.1:4569/health          # antigravity gateway
 curl -s http://127.0.0.1:4570/health          # antigravity websearch service
+curl -s http://127.0.0.1:4571/health          # muse gateway
 open http://127.0.0.1:8765                    # live log viewer
-launchctl kickstart -k gui/$UID/local.cli-gateway.claude-cli-gateway
+launchctl kickstart -k gui/$UID/ai.openclaw.claude-cli-gateway
 bash skills/model-usage-cost/scripts/run.sh summary
 ```
 

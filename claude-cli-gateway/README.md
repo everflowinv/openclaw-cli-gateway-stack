@@ -26,10 +26,13 @@ Endpoints:
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 
-The service binds to `127.0.0.1:4568` by default. It exposes only Claude's
-`ToolSearch` built-in; deferred tools are loaded from `mcp__openclaw__*`, so
-file, shell, messaging, and gateway operations continue to pass through the
-existing OpenClaw MCP proxy.
+The service binds to `127.0.0.1:4568` by default. Requests run at maximum
+permission (`--dangerously-skip-permissions`): a headless provider cannot
+answer permission prompts. The tool surface follows the request — with no
+`tools` field the CLI keeps its full native set plus the `mcp__openclaw__*`
+bridge; an explicit `tools` list bounds the run to that MCP subset (reached
+through `ToolSearch`, narrowed again by the proxy allowlist); an empty list
+or `tool_choice: "none"` runs with no tools at all.
 
 OpenClaw registers this endpoint as the separate `claude-cli-gateway`
 provider.
@@ -37,8 +40,8 @@ provider.
 Since 2026-09-05 the gateway also:
 
 - passes OpenAI `reasoning_effort` through to `claude -p --effort`
-  (low/medium/high/xhigh/max; `none`/`off` are ignored; anything else is a
-  400 with the valid list), and
+  (low/medium/high/xhigh/max; `none`/`off`/`minimal` map to `low` and
+  `ultra` to `max`; anything else is a 400 with the valid list), and
 - reports usage with a real cache split (`prompt_tokens_details.cached_tokens`
   + `cache_creation_input_tokens`, OpenAI-style) so OpenClaw prices cache
   reads at the cache rate instead of full input price. Keep that id distinct from OpenClaw's auto-discovered native
@@ -55,8 +58,11 @@ Service operations:
 
 Environment controls:
 
-- `CLAUDE_CLI_GATEWAY_MODEL_ALLOWLIST`（可选）：只开放逗号分隔的已知模型，不改变 CLI 认证。
-
+- `CLAUDE_CLI_GATEWAY_AUTOCOMPACT` (default `1000000`, or `auto`): pins the
+  CLI's in-run auto-compact window. The default keeps the full native 1M
+  context inside a run — OpenClaw's 950k context target owns cross-turn
+  sizing, and the CLI's own threshold must not silently summarize early
+  tool results mid-turn.
 - `CLAUDE_CLI_GATEWAY_WORKSPACE` / `OPENCLAW_WORKSPACE` (default
   `~/.openclaw/workspace`) — workspace dir passed as the CLI cwd
 - `CLAUDE_CLI_GATEWAY_PORT` (default `4568`)
@@ -94,7 +100,9 @@ Opus 5.5 的 `4572` 入口。它使用同一个官方 CLI 登录，不代表模�
 2026-10-10：移除 OpenClaw 中 Opus 5.5 的单模型 `baseUrl` 覆盖，统一继承
 Claude provider 的 `http://127.0.0.1:4568/v1`。Opus、Sonnet、Fable 和 Haiku
 共享该入口的 6 个并发槽位。旧 `4572` 入口在现有请求排空后停用，其
-LaunchAgent 从自动加载目录移出；独立入口模板仅保留作历史／隔离部署参考。
+LaunchAgent 从自动加载目录移出。2026-10-12 起独立入口的 launchd 模板与
+`CLAUDE_CLI_GATEWAY_MODEL_ALLOWLIST` 代码一并删除：所有 Claude 型号只走
+同一个 4568 网关，不再维护单模型隔离通道。
 
 ## Haiku 5.5 接入（2026-10-07）
 
@@ -119,3 +127,15 @@ sets the child process effort environment so inherited settings cannot override 
 `/health` reports `outputTokenLimitEnforced: false`. Size the outer provider
 request deadline above the gateway queue plus execution timeout; Dalton's
 separate 600-second budget is an intentional earlier cancellation boundary.
+
+## Provider-surface update (2026-10-12, Claude Code 2.1.296)
+
+- Structured output: `response_format` (`json_schema` / `json_object`) is
+  passed to the CLI's native `--json-schema`; the reply is the CLI's
+  `structured_output`, never surrounding prose. Unknown format types are a
+  400 instead of being silently ignored.
+- Terminal failures classify provider-style with the CLI message verbatim:
+  prompt/context overflow → `413 CLAUDE_CLI_CONTEXT_TOO_LONG`,
+  quota/rate/overload → `429 CLAUDE_CLI_QUOTA`, other CLI failures → 502.
+- `--autocompact` is pinned (see Environment controls) so a long native
+  tool loop cannot compact away context OpenClaw still accounts as present.

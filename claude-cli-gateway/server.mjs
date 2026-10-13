@@ -10,6 +10,7 @@ import { normalizedClaudeUsage as normalizedUsage, contextClaudeUsage } from "..
 
 import { createCliVersionProbe } from "../lib/cli-version.mjs";
 import { createCliProcessCleanup } from "../lib/cli-process-cleanup.mjs";
+import { applyAllowedToolsEnv, parseResponseFormat, readOpenClawToolNames, resolveAllowedTools } from "../lib/openai-request.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE = process.env.CLAUDE_CLI_GATEWAY_WORKSPACE
@@ -24,6 +25,21 @@ const QUEUE_TIMEOUT_MS = numberFromEnv("CLAUDE_CLI_GATEWAY_QUEUE_TIMEOUT_SECONDS
 const TIMEOUT_MS = numberFromEnv("CLAUDE_CLI_GATEWAY_TIMEOUT_SECONDS", 3600, 30, 86400) * 1000;
 const STALL_TIMEOUT_MS = numberFromEnv("CLAUDE_CLI_GATEWAY_STALL_SECONDS", 1200, 1, 3600) * 1000;
 const MAX_TURNS = numberFromEnv("CLAUDE_CLI_GATEWAY_MAX_TURNS", 200, 1, 1000);
+// Claude Code 2.1.296 auto-compacts inside a run at its own threshold,
+// which would silently summarize early tool results mid-turn while this
+// gateway keeps reporting first-call usage to OpenClaw. Pin the window to
+// the models' full 1M so the native loop keeps everything OpenClaw sent;
+// OpenClaw's own compaction (950k context target) owns cross-turn sizing.
+// Accepts "auto" or a token count in the CLI's 100k-1M range.
+const AUTOCOMPACT = (() => {
+  const raw = String(process.env.CLAUDE_CLI_GATEWAY_AUTOCOMPACT || "1000000").trim();
+  if (raw === "auto") return raw;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 100_000 || value > 1_000_000) {
+    throw new Error("CLAUDE_CLI_GATEWAY_AUTOCOMPACT must be 'auto' or an integer between 100000 and 1000000");
+  }
+  return String(value);
+})();
 // Hard per-call ceiling for openclaw exec/process tools. Without it the model
 // may pass timeoutMs up to the proxy default of 30 min, outliving caller turn
 // timeouts and turning into a silent hang that ends as an aborted request.
@@ -59,18 +75,12 @@ const ALLOWED_IMAGE_MIMES = new Set([
 ]);
 
 const MODELS = new Map([
-  ["claude-opus-5-5", { id: "claude-opus-5-5", created: 1790035200, input: ["text", "image"] }],
-  ["claude-sonnet-5-5", { id: "claude-sonnet-5-5", created: 1790553600, input: ["text", "image"] }],
-  ["claude-fable-5-1", { id: "claude-fable-5-1", created: 1788220800, input: ["text", "image"] }],
-  ["claude-haiku-5-5", { id: "claude-haiku-5-5", created: 1791331200, input: ["text", "image"] }],
+  ["claude-opus-5-5", { id: "claude-opus-5-5", created: 1790035200, input: ["text", "image"], reasoning: true, context_window: 1000000, max_output_tokens: 128000 }],
+  ["claude-sonnet-5-5", { id: "claude-sonnet-5-5", created: 1790553600, input: ["text", "image"], reasoning: true, context_window: 1000000, max_output_tokens: 128000 }],
+  ["claude-fable-5-1", { id: "claude-fable-5-1", created: 1788220800, input: ["text", "image"], reasoning: true, context_window: 1000000, max_output_tokens: 64000 }],
+  ["claude-haiku-5-5", { id: "claude-haiku-5-5", created: 1791331200, input: ["text", "image"], reasoning: true, context_window: 1000000, max_output_tokens: 128000 }],
 ]);
-
-// Optional isolated model lane; used for a non-interrupting Opus 5.5 rollout.
-const MODEL_ALLOWLIST = String(process.env.CLAUDE_CLI_GATEWAY_MODEL_ALLOWLIST || "").split(",").map(s => s.trim()).filter(Boolean);
-if (MODEL_ALLOWLIST.length) {
-  for (const id of MODELS.keys()) if (!MODEL_ALLOWLIST.includes(id)) MODELS.delete(id);
-  if (!MODELS.size) throw new Error("CLAUDE_CLI_GATEWAY_MODEL_ALLOWLIST selects no known models");
-}
+const KNOWN_TOOLS = readOpenClawToolNames(path.join(HERE, "..", "openclaw-mcp-proxy", "tools-schema.json"));
 
 let activeRequests = 0;
 const waiters = [];
@@ -377,12 +387,15 @@ function translateRequest(body) {
 
   const systemPrompt = systemParts.join("\n\n");
   const requesterSessionKey = extractRequesterSessionKey(systemPrompt);
+  const jsonSchema = parseResponseFormat(body);
   return {
     model: body.model,
     effort: resolveEffort(body.reasoning_effort ?? body.reasoning?.effort),
     promptContent,
     systemPrompt,
     requesterSessionKey,
+    allowedTools: resolveAllowedTools(body, KNOWN_TOOLS),
+    jsonSchema: jsonSchema ? JSON.stringify(jsonSchema) : null,
     imageCount: imageTracker.count,
     imageBytes: imageTracker.totalBytes,
     stream: body.stream === true,
@@ -415,7 +428,7 @@ function extractRequesterSessionKey(systemPrompt) {
   return match?.[1]?.replace(/[.!?。！？]+$/, "");
 }
 
-function cliEnvironment(requesterSessionKey) {
+function cliEnvironment(requesterSessionKey, allowedTools) {
   const env = { ...process.env };
   delete env.CLAUDECODE;
   delete env.CLAUDE_CODE_ENTRYPOINT;
@@ -424,10 +437,19 @@ function cliEnvironment(requesterSessionKey) {
   );
   if (requesterSessionKey) env.OPENCLAW_REQUESTER_SESSION_KEY = requesterSessionKey;
   else delete env.OPENCLAW_REQUESTER_SESSION_KEY;
+  applyAllowedToolsEnv(env, allowedTools);
   return env;
 }
 
 function createClaudeProcess(job) {
+  // Permission posture is always maximum (bypass): the gateway is a
+  // non-interactive provider, so a permission prompt can only hang or deny.
+  // Tool surface follows the request instead: no tools field keeps the
+  // CLI's full native set plus the OpenClaw MCP bridge; an explicit tools
+  // list bounds the run to the (env-narrowed) MCP bridge reached through
+  // ToolSearch; an empty list / tool_choice "none" runs with no tools.
+  const restricted = job.allowedTools !== null;
+  const toolsDisabled = restricted && job.allowedTools.length === 0;
   const args = [
     "-p",
     "--model", job.model,
@@ -436,12 +458,21 @@ function createClaudeProcess(job) {
     "--verbose",
     "--include-partial-messages",
     "--max-turns", String(MAX_TURNS),
-    "--tools", "ToolSearch",
-    "--allowedTools", "mcp__openclaw__*",
-    "--mcp-config", MCP_CONFIG,
-    "--strict-mcp-config",
+    "--autocompact", AUTOCOMPACT,
+    "--dangerously-skip-permissions",
     "--no-session-persistence",
   ];
+  if (toolsDisabled) {
+    args.push("--tools", "");
+  } else {
+    if (restricted) args.push("--tools", "ToolSearch");
+    args.push(
+      "--allowedTools", "mcp__openclaw__*",
+      "--mcp-config", MCP_CONFIG,
+      "--strict-mcp-config",
+    );
+  }
+  if (job.jsonSchema) args.push("--json-schema", job.jsonSchema);
   if (job.effort) {
     args.push("--effort", job.effort);
   }
@@ -455,7 +486,7 @@ function createClaudeProcess(job) {
   const child = spawn(CLAUDE_BIN, args, {
     detached: true,
     cwd: WORKSPACE,
-    env: { ...cliEnvironment(job.requesterSessionKey), ...(job.effort ? { CLAUDE_CODE_EFFORT_LEVEL: job.effort } : {}) },
+    env: { ...cliEnvironment(job.requesterSessionKey, job.allowedTools), ...(job.effort ? { CLAUDE_CODE_EFFORT_LEVEL: job.effort } : {}) },
     stdio,
   });
   // The CLI can exit before draining stdin (auth/network failure); the
@@ -476,6 +507,36 @@ function sanitizeError(text) {
     .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s]+/gi, "$1[REDACTED]")
     .replace(/(api[_-]?key\s*[:=]\s*)[^\s]+/gi, "$1[REDACTED]")
     .slice(-6000);
+}
+
+// Classify terminal CLI failures the way a normal provider would, keeping
+// the CLI's message verbatim (OpenClaw additionally pattern-matches the
+// text): prompt/context overflow -> 413 so compaction/failover engages,
+// quota/rate/overload -> 429, everything else -> 502.
+function cliFailure(message, resultEvent) {
+  const text = sanitizeError(message) || "Claude CLI failed";
+  const error = new Error(text);
+  if (/\bprompt is too long\b|input is too long|context.{0,40}(too long|exceed|maximum|limit)|too many tokens/i.test(text)) {
+    error.code = "CLAUDE_CLI_CONTEXT_TOO_LONG";
+    error.statusCode = 413;
+  } else if (/quota|rate.?limit|usage.?limit|overloaded|too many requests|\b429\b|\b529\b/i.test(text)) {
+    error.code = "CLAUDE_CLI_QUOTA";
+    error.statusCode = 429;
+  } else {
+    error.code = "CLAUDE_CLI_ERROR";
+    error.statusCode = 502;
+  }
+  error.resultEvent = resultEvent;
+  return error;
+}
+
+// With --json-schema the CLI returns both a JSON-string result and a parsed
+// structured_output; the structured value, re-serialized, is authoritative.
+function finalResultText(job, result) {
+  if (job.jsonSchema && result?.structured_output !== undefined) {
+    return JSON.stringify(result.structured_output);
+  }
+  return typeof result?.result === "string" ? result.result : "";
 }
 
 function runClaude(job, callbacks) {
@@ -556,9 +617,7 @@ function runClaude(job, callbacks) {
           resultEvent = event;
           callbacks.onResult?.(event);
           if (event.subtype !== 'success' || event.is_error === true) {
-            const error = failure(sanitizeError(event.result || event.errors?.join?.('\n')) || 'Claude CLI failed', 'CLAUDE_CLI_ERROR', 502);
-            error.resultEvent = event;
-            cleanup.terminate(error);
+            cleanup.terminate(cliFailure(event.result || event.errors?.join?.('\n') || 'Claude CLI failed', event));
           } else {
             // Keep exit verification, but do not hold a slot for a CLI that
             // has finished its turn and never exits.
@@ -588,10 +647,7 @@ function runClaude(job, callbacks) {
         || stderr
         || `Claude CLI exited with code ${code ?? "unknown"}${signal ? ` (${signal})` : ""}`,
       );
-      const error = new Error(detail || "Claude CLI failed without an error message");
-      error.code = "CLAUDE_CLI_ERROR";
-      error.resultEvent = resultEvent;
-      return finish(error);
+      return finish(cliFailure(detail || "Claude CLI failed without an error message", resultEvent));
     });
 
     callbacks.onChild?.(child, () => cleanup.terminate(failure('Request cancelled', 'CLAUDE_CLI_CANCELLED', 499)));
@@ -662,6 +718,8 @@ async function handleChatCompletion(req, res, body) {
     model: job.model,
     effort: job.effort,
     session: job.requesterSessionKey || null,
+    tools: job.allowedTools === null ? "all" : job.allowedTools,
+    structuredOutput: Boolean(job.jsonSchema),
     stream: job.stream,
     images: job.imageCount,
     queued: waiters.length,
@@ -776,14 +834,17 @@ async function handleChatCompletion(req, res, body) {
           onText: (text) => {
             logCallbacks.onText(text);
             if (!text || res.destroyed) return;
+            // Structured output arrives whole from the final result below.
+            if (job.jsonSchema) return;
             emittedText += text;
             sse(streamChunk(id, created, job.model, { content: text }));
           },
         });
-        if (!emittedText && typeof result.result === "string" && result.result) {
-          emittedText = result.result;
-          logCallbacks.onText(result.result);
-          sse(streamChunk(id, created, job.model, { content: result.result }));
+        const finalText = finalResultText(job, result);
+        if (!emittedText && finalText) {
+          emittedText = finalText;
+          logCallbacks.onText(finalText);
+          sse(streamChunk(id, created, job.model, { content: finalText }));
         }
         sse(streamChunk(id, created, job.model, {}, "stop"));
         if (job.includeUsage) {
@@ -808,7 +869,7 @@ async function handleChatCompletion(req, res, body) {
           model: job.model,
           choices: [{
             index: 0,
-            message: { role: "assistant", content: result.result || "" },
+            message: { role: "assistant", content: finalResultText(job, result) },
             finish_reason: "stop",
           }],
           usage: contextClaudeUsage(result.firstCallUsage, result.usage),
@@ -849,6 +910,9 @@ const server = http.createServer(async (req, res) => {
         execMaxTimeoutMs: EXEC_MAX_TIMEOUT_MS,
         reasoningEfforts: EFFORTS,
         outputTokenLimitEnforced: false,
+        structuredOutput: true,
+        permissionMode: "dangerously-skip-permissions",
+        autocompact: AUTOCOMPACT,
         multimodal: {
           input: ["text", "image"],
           imageMimes: [...ALLOWED_IMAGE_MIMES],

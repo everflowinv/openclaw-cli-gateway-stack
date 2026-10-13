@@ -37,6 +37,9 @@ const AGY_BIN = process.env.AGY_CLI_BIN || join(process.env.HOME || "", ".local/
 const AGENT_NAME = process.env.AGY_SEARCH_AGENT || "websearch";
 const MODEL = process.env.AGY_SEARCH_MODEL || "gemini-3.8-flash";
 const EFFORT = process.env.AGY_SEARCH_EFFORT || "low";
+// agy 1.3.3 selects models by suffixed id; `--model <base> --effort <x>` is
+// intermittently rejected upstream. Send the suffixed id (see server.mjs).
+const AGY_MODEL_ID = /-(low|medium|high)$/.test(MODEL) ? MODEL : `${MODEL}-${EFFORT}`;
 const TIMEOUT_MS = Number(process.env.AGY_SEARCH_TIMEOUT_MS || 90_000);
 const STALL_MS = Number(process.env.AGY_SEARCH_STALL_MS || 60_000);
 const MAX_CONCURRENT = Number(process.env.AGY_SEARCH_MAX_CONCURRENT || 8);
@@ -283,8 +286,7 @@ function runAgySearch(translatedQuery) {
       "--agent", AGENT_NAME,
       "--input-format", "stream-json",
       "--output-format", "stream-json",
-      "--model", MODEL,
-      "--effort", EFFORT,
+      "--model", AGY_MODEL_ID,
       "--dangerously-skip-permissions",
       "--disable-slash-commands",
       "--print-timeout", `${Math.ceil(TIMEOUT_MS / 1000) + 60}s`,

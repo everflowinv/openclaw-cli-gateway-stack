@@ -5,19 +5,40 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 HOME_DIR="$HOME"
-LABEL_PREFIX="local.cli-gateway"          # e.g. local.cli-gateway.claude
+# Labels default to the deployed ai.openclaw.* set so re-running updates the
+# running services in place instead of starting duplicates on the same
+# ports. Set CLI_GATEWAY_LABEL_PREFIX to install under "<prefix>.<component>"
+# labels instead (the plist filenames follow the label).
 OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME_DIR/.openclaw}"
 OPENCLAW_LOG_DIR="${OPENCLAW_LOG_DIR:-$OPENCLAW_HOME/logs}"
 OPENCLAW_WORKSPACE="${OPENCLAW_WORKSPACE:-$OPENCLAW_HOME/workspace}"
 LAUNCH_AGENTS="$HOME_DIR/Library/LaunchAgents"
 RENDER_ONLY=0
-if [ "${1:-}" = "--render-only" ] && [ "$#" -eq 2 ]; then
-  RENDER_ONLY=1
-  LAUNCH_AGENTS="$2"
-elif [ "$#" -ne 0 ]; then
-  echo "Usage: bash launchd/install.sh [--render-only OUTPUT_DIR]" >&2
-  exit 2
-fi
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --render-only)
+      [ "$#" -ge 2 ] || { echo "Usage: bash launchd/install.sh [--render-only OUTPUT_DIR]" >&2; exit 2; }
+      RENDER_ONLY=1
+      LAUNCH_AGENTS="$2"
+      shift 2
+      ;;
+    *)
+      echo "Usage: bash launchd/install.sh [--render-only OUTPUT_DIR]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+label_for() { # label_for <component>
+  if [ -n "${CLI_GATEWAY_LABEL_PREFIX:-}" ]; then
+    echo "$CLI_GATEWAY_LABEL_PREFIX.$1"
+    return
+  fi
+  case "$1" in
+    log-viewer) echo "com.openclaw.log-viewer" ;;
+    *) echo "ai.openclaw.$1" ;;
+  esac
+}
 
 if [ -z "${NODE_BIN:-}" ]; then
   if [ -x "$OPENCLAW_HOME/tools/node/bin/node" ]; then
@@ -51,8 +72,9 @@ render() { # render <template> <out.plist> <label>
 }
 
 install_service() { # install_service <component>
-  local component="$1" label="$LABEL_PREFIX.$1"
-  local plist="$label.plist"
+  local component="$1" label plist
+  label="$(label_for "$component")"
+  plist="$label.plist"
   render "$component.plist.template" "$plist" "$label"
   if [ "$RENDER_ONLY" -eq 1 ]; then return; fi
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
@@ -63,6 +85,7 @@ install_service() { # install_service <component>
 install_service "claude-cli-gateway"
 install_service "antigravity-cli-gateway"
 install_service "antigravity-websearch"
+install_service "muse-cli-gateway"
 install_service "log-viewer"
 
 if [ "$RENDER_ONLY" -eq 1 ]; then exit 0; fi
@@ -73,4 +96,5 @@ sleep 2
 curl -s --max-time 10 http://127.0.0.1:4568/health && echo
 curl -s --max-time 10 http://127.0.0.1:4569/health && echo
 curl -s --max-time 10 http://127.0.0.1:4570/health && echo
+curl -s --max-time 10 http://127.0.0.1:4571/health && echo
 echo "log viewer: http://127.0.0.1:8765"

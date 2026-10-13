@@ -80,6 +80,14 @@ process.stdin.on("end", () => {
     console.log(JSON.stringify({type:'result',subtype:'error',is_error:true,result:'fixture failed'}));
     setInterval(()=>{},1000); return;
   }
+  if (input.includes('too-long-case')) {
+    console.log(JSON.stringify({type:'result',subtype:'error',is_error:true,result:'Prompt is too long · the request is ~1071529 tokens (limit 1000000)'}));
+    return;
+  }
+  if (input.includes('quota-case')) {
+    console.log(JSON.stringify({type:'result',subtype:'error',is_error:true,result:'You have hit your usage limit; try again later'}));
+    return;
+  }
   const progress = input.includes('progress-case') ? setInterval(()=>console.log('{}'),400) : null;
   setTimeout(() => {
     clearInterval(progress);
@@ -89,10 +97,13 @@ process.stdin.on("end", () => {
       type: "result",
       subtype: "success",
       is_error: false,
-      result: input.includes('effort-case') ? JSON.stringify({effort:process.argv[process.argv.indexOf('--effort')+1],envEffort:process.env.CLAUDE_CODE_EFFORT_LEVEL}) : "ok",
+      result: input.includes('effort-case') ? JSON.stringify({effort:process.argv[process.argv.indexOf('--effort')+1],envEffort:process.env.CLAUDE_CODE_EFFORT_LEVEL})
+        : input.includes('args-case') ? JSON.stringify({argv:process.argv.slice(2),enabledTools:process.env.OPENCLAW_MCP_ENABLED_TOOLS??null})
+        : input.includes('structured-case') ? '{"a":"hello","extra":1}' : "ok",
+      ...(input.includes('structured-case') ? {structured_output:{a:"hello"}} : {}),
       usage: { input_tokens: "15", cache_read_input_tokens: "5800", cache_creation_input_tokens: 4300, output_tokens: 20.7 },
     }) + "\\n");
-  }, input.includes("effort-case") ? 5 : input.includes("progress-case") ? 11500 : 1800);
+  }, (input.includes("effort-case") || input.includes("args-case") || input.includes("structured-case")) ? 5 : input.includes("progress-case") ? 11500 : 1800);
 });
 `, "utf8");
   fs.chmodSync(fakeClaude, 0o700);
@@ -128,6 +139,9 @@ process.stdin.on("end", () => {
     const health = await waitForHealth(port);
     assert.equal(health.maxConcurrent, 1);
     assert.equal(health.queueTimeoutSeconds, 1);
+    assert.equal(health.structuredOutput, true);
+    assert.equal(health.permissionMode, "dangerously-skip-permissions");
+    assert.equal(health.autocompact, "1000000");
 
     const first = requestJson(port, "POST", "/v1/chat/completions", requestBody);
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -167,6 +181,38 @@ process.stdin.on("end", () => {
       assert.equal(result.status, 200);
       assert.deepEqual(JSON.parse(result.body.choices[0].message.content), {effort:expected,envEffort:expected});
     }
+    // Maximum-permission posture + request-shaped tool surface.
+    const argsOf = async (extra) => {
+      const r = await requestJson(port, 'POST', '/v1/chat/completions', { ...requestBody, messages: [{ role: 'user', content: 'args-case' }], ...extra });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      return JSON.parse(r.body.choices[0].message.content);
+    };
+    const unrestricted = await argsOf({});
+    assert.ok(unrestricted.argv.includes('--dangerously-skip-permissions'));
+    assert.equal(unrestricted.argv[unrestricted.argv.indexOf('--autocompact') + 1], '1000000');
+    assert.equal(unrestricted.argv.includes('--tools'), false, 'unrestricted runs keep the full native tool set');
+    assert.ok(unrestricted.argv.includes('--mcp-config'));
+    assert.equal(unrestricted.enabledTools, null);
+    const narrowed = await argsOf({ tools: [{ type: 'function', function: { name: 'exec' } }] });
+    assert.equal(narrowed.argv[narrowed.argv.indexOf('--tools') + 1], 'ToolSearch', 'an explicit tools list bounds the run to the MCP bridge');
+    assert.equal(narrowed.enabledTools, 'exec');
+    const disabled = await argsOf({ tool_choice: 'none' });
+    assert.equal(disabled.argv[disabled.argv.indexOf('--tools') + 1], '', 'tool_choice none disables built-in tools');
+    assert.equal(disabled.argv.includes('--mcp-config'), false, 'tool_choice none omits the MCP bridge');
+    const withSchema = await argsOf({ response_format: { type: 'json_schema', json_schema: { schema: { type: 'object' } } } });
+    assert.ok(withSchema.argv.includes('--json-schema'));
+    // Structured output returns the schema-shaped value, not surrounding prose.
+    const structured = await requestJson(port, 'POST', '/v1/chat/completions', { ...requestBody, messages: [{ role: 'user', content: 'structured-case' }], response_format: { type: 'json_schema', json_schema: { schema: { type: 'object', properties: { a: { type: 'string' } } } } } });
+    assert.equal(structured.status, 200);
+    assert.equal(structured.body.choices[0].message.content, '{"a":"hello"}');
+    // Terminal failures classify like a normal provider.
+    const tooLong = await requestJson(port, 'POST', '/v1/chat/completions', { ...requestBody, messages: [{ role: 'user', content: 'too-long-case' }] });
+    assert.equal(tooLong.status, 413, JSON.stringify(tooLong.body));
+    assert.equal(tooLong.body.error.code, 'CLAUDE_CLI_CONTEXT_TOO_LONG');
+    assert.match(tooLong.body.error.message, /Prompt is too long/);
+    const quota = await requestJson(port, 'POST', '/v1/chat/completions', { ...requestBody, messages: [{ role: 'user', content: 'quota-case' }] });
+    assert.equal(quota.status, 429, JSON.stringify(quota.body));
+    assert.equal(quota.body.error.code, 'CLAUDE_CLI_QUOTA');
     await checkCancelledQueue(port, requestBody);
     for (const [content, expected] of [['failure-hang-case','CLAUDE_CLI_ERROR'], ['stall-case','CLAUDE_CLI_STALL']]) {
       const start = Date.now();

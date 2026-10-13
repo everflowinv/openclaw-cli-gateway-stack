@@ -81,7 +81,11 @@ function parseLine(line, emit) {
     }
   } else if (kind === "result") {
     const result = event.result || {};
-    const text = typeof result.response === "string" ? result.response : null;
+    // With --json-schema (agy 1.3.x) the schema-shaped value rides in
+    // structured_output; response text may carry extra toolAction fields.
+    const text = result.structured_output !== undefined
+      ? JSON.stringify(result.structured_output)
+      : typeof result.response === "string" ? result.response : null;
     emit({
       type: "result",
       status: result.status,

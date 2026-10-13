@@ -82,7 +82,10 @@ function parseLine(line, emit) {
     emit({
       type: "result",
       subtype: event.subtype,
-      text: typeof event.result === "string" ? event.result : null,
+      // With --json-schema, structured_output is the authoritative value.
+      text: event.structured_output !== undefined
+        ? JSON.stringify(event.structured_output)
+        : typeof event.result === "string" ? event.result : null,
       isError: event.is_error === true,
       usage: normalizeUsage(event.usage),
     });
