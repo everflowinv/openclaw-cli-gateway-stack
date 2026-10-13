@@ -44,6 +44,11 @@
   .session-chip { display: inline-block; font-size: 10px; padding: 0 6px; border-radius: 8px; margin-right: 8px; vertical-align: 1px; color: #0d1117; font-weight: 700; }
   #stats { background: #161b22; border-top: 1px solid #30363d; padding: 5px 16px; font-size: 11px; color: #8b949e; flex-shrink: 0; display: flex; gap: 16px; }
   .hidden { display: none !important; }
+  #overview { padding: 8px 16px; color: #8b949e; }
+  #accounting { border-bottom: 1px solid #30363d; flex-shrink: 0; max-height: 40vh; overflow: auto; }
+  #accounting > summary { cursor: pointer; padding: 6px 16px; color: #8b949e; }
+  .tool-detail summary { cursor: pointer; color: #58a6ff; }
+  .tool-detail pre { white-space: pre-wrap; padding: 6px 12px; color: #8b949e; }
   #metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; padding: 12px 16px 8px; flex-shrink: 0; }
   .metric { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; }
   .metric .label { color: #8b949e; font-size: 11px; }
@@ -51,6 +56,9 @@
   .metric .detail { color: #8b949e; font-size: 10px; min-height: 14px; }
   #source-note { color: #8b949e; padding: 0 16px 8px; font-size: 11px; flex-shrink: 0; }
   #model-summary { display: flex; gap: 8px; padding: 0 16px 10px; flex-wrap: wrap; flex-shrink: 0; }
+  #request-accounting { padding: 0 16px 12px; overflow-x: auto; }
+  #request-accounting table { border-collapse: collapse; white-space: nowrap; font-size: 11px; }
+  #request-accounting th, #request-accounting td { padding: 4px 12px 4px 0; text-align: left; border-bottom: 1px solid #21262d; }
   .model-pill { text-align: left; font-size: 11px; }
   @media(max-width: 850px) { #header { flex-wrap: wrap; } #filename { display: none; } #metrics { grid-template-columns: repeat(2, 1fr); } #filter-bar { flex-wrap: wrap; } }
 </style>
@@ -67,6 +75,8 @@
     <button onclick="downloadLog()">下载日志</button>
   </div>
 </div>
+<div id="overview">等待请求…</div>
+<details id="accounting"><summary>用量与刊例估价 · 点击展开</summary>
 <div id="metrics">
   <div class="metric"><div class="label">已加载请求</div><div class="value" id="metric-requests">0</div><div class="detail">按请求 ID 去重</div></div>
   <div class="metric"><div class="label">运行中 / 失败</div><div class="value" id="metric-running">0 / 0</div><div class="detail" id="metric-success">已完成 0</div></div>
@@ -76,6 +86,8 @@
 </div>
 <div id="source-note">汇总当前加载的最近请求，最多 1,000 条；不受文本筛选影响。</div>
 <div id="model-summary"></div>
+<div id="request-accounting"></div>
+</details>
 <div id="filter-bar">
   <select id="session-filter" onchange="applyFilter()">
     <option value="">全部请求</option>
@@ -151,6 +163,7 @@
       items: [],                // rendered items: {el, session, getText()}
       sessions: new Map(),      // tag8 -> {color, openBlock}
       requests: new Map(),      // one accounting record per gateway request
+      tools: new Map(),
       errorCount: 0,
       unseenErrors: 0,
       lastSeq: null,
@@ -291,23 +304,88 @@
   // ───────── log line parsing (shared by all gateways) ─────────
   const PREFIX_RE = /^\[[A-Z0-9]+GW\] /;
 
+  function sumUsage(calls) {
+    const u = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, prompt_tokens_details: { cached_tokens: 0 }, cache_creation_input_tokens: 0 };
+    for (const call of calls) {
+      for (const k of ['prompt_tokens', 'completion_tokens', 'total_tokens']) u[k] += call.usage[k] || 0;
+      u.prompt_tokens_details.cached_tokens += call.usage.prompt_tokens_details?.cached_tokens || 0;
+      u.cache_creation_input_tokens += call.usage.cache_creation_input_tokens || 0;
+    }
+    return u;
+  }
   function trackRequest(src, obj) {
-    if (!obj.request) return;
+    if (!obj.request || !['start','init','model','usage','done','error','cancel'].includes(obj.event)) return;
     const map = src.state.requests;
-    if (!map.has(obj.request)) map.set(obj.request, { model: obj.model || '未记录模型', status: 'unknown', usage: null, cost: null, background: null });
+    if (!map.has(obj.request)) map.set(obj.request, { model: obj.model || '未记录模型', status: 'unknown', usage: null, cost: null, background: null, calls: new Map(), finalized: false });
     const r = map.get(obj.request);
-    if (obj.model) r.model = obj.model;
+    if (obj.model && obj.usageScope !== 'model-call' && !obj.messageId) r.model = obj.model;
     if (obj.event === 'start') { r.status = 'running'; r.context = obj.contextWindow; r.bytes = obj.maxPromptBytes; }
     if (obj.event === 'done') r.status = 'done';
     if (obj.event === 'error' || obj.event === 'cancel') r.status = 'error';
-    if (obj.event === 'usage' || obj.event === 'done') {
-      if (Number.isFinite(obj.usage?.total_tokens)) r.usage = obj.usage;
-      if (Number.isFinite(obj.estimatedCostUsd)) r.cost = obj.estimatedCostUsd;
-      if (obj.backgroundUsage) r.background = obj.backgroundUsage;
-      if (obj.coverage) r.coverage = obj.coverage;
+    if (Number.isFinite(obj.usage?.total_tokens)) {
+      if (obj.event === 'usage' && obj.messageId) {
+        r.calls.set(obj.messageId, { usage: obj.usage, cost: obj.estimatedCostUsd, complete: obj.usageComplete === true });
+        if (!r.finalized) {
+          const calls = [...r.calls.values()];
+          r.usage = sumUsage(calls);
+          r.cost = calls.every(c => Number.isFinite(c.cost)) ? calls.reduce((n,c) => n+c.cost, 0) : null;
+          r.complete = calls.every(c => c.complete);
+        }
+      } else {
+        r.usage = obj.usage;
+        r.cost = Number.isFinite(obj.estimatedCostUsd) ? obj.estimatedCostUsd : null;
+        r.complete = obj.usageComplete === true || obj.event === 'done';
+        r.finalized = ['done', 'error', 'cancel'].includes(obj.event);
+      }
     }
+    if (obj.backgroundUsage) r.background = obj.backgroundUsage;
+    if (obj.coverage) r.coverage = obj.coverage;
+    if (obj.usage_reported) r.reported = obj.usage_reported;
+    if (obj.costBasis) r.costBasis = obj.costBasis;
+    if (obj.usage_raw?.thinking_tokens != null) r.reasoning = obj.usage_raw.thinking_tokens;
     while (map.size > 1000) map.delete(map.keys().next().value);
     if (src === active) renderMetrics(src);
+  }
+  const readable = value => typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value, null, 2);
+  function renderTool(src, tag, obj) {
+    const tools = src.state.tools;
+    const id = obj.toolUseId || obj.callId || obj.id;
+    let key = id ? tag + ':' + id : null;
+    if (!key && obj.event !== 'tool') {
+      const candidates = [...tools].filter(([k,t]) => t.tag === tag && !t.done && (!obj.name || t.name === obj.name));
+      if (candidates.length === 1) key = candidates[0][0];
+    }
+    key ||= tag + ':anonymous:' + tools.size;
+    let t = tools.get(key);
+    if (!t || !t.el.isConnected) {
+      const sess = getSession(src, tag); closeBlock(sess);
+      const el = document.createElement('details'); el.className = 'item tool-detail'; el.style.borderLeftColor = sess.color;
+      const summary = document.createElement('summary'); el.appendChild(summary);
+      const pre = document.createElement('pre'); el.appendChild(pre);
+      t = { el, summary, pre, tag, name: obj.name || '工具', args: '', output: '', done: false };
+      t.item = pushItem(src, el, tag, () => t.name + ' ' + t.args + ' ' + t.output);
+      tools.set(key,t);
+      while (tools.size > MAX_ITEMS) tools.delete(tools.keys().next().value);
+    }
+    if (obj.name) t.name = obj.name;
+    if (obj.event === 'tool_args') t.args += obj.text || '';
+    else if (obj.args) t.args = readable(obj.args);
+    if (['tool_done','tool_result','tool_error'].includes(obj.event)) {
+      t.done = true; t.output = readable(obj.output ?? obj.content ?? obj.error);
+      if (obj.event === 'tool_error' && !t.failed) {
+        t.failed = true; src.state.errorCount++;
+        if (src !== active) { src.state.unseenErrors++; renderTabBadge(src); }
+        updateStats(src);
+      }
+    }
+    t.summary.textContent = `${tag} · ${t.failed ? '失败' : t.done ? '完成' : '调用'} · ${t.name}`;
+    t.pre.textContent = `参数
+${t.args || '未记录'}
+
+结果
+${t.output || (t.done ? '未记录正文' : '等待返回…')}`;
+    refreshItemVisibility(src,t.item);
+    if (src === active) scheduleScroll();
   }
   const number = value => Number(value).toLocaleString('zh-CN');
   function renderMetrics(src) {
@@ -315,18 +393,36 @@
     const measured = rows.filter(r => r.usage), priced = rows.filter(r => r.cost !== null);
     const terminal = rows.filter(r => r.status === 'done' || r.status === 'error');
     const sum = (list, fn) => list.reduce((n, r) => n + (fn(r) || 0), 0);
+    document.getElementById('overview').textContent = `${rows.length} 个请求 · 运行中 ${rows.filter(r => r.status === 'running').length} · 已完成 ${rows.filter(r => r.status === 'done').length} · 失败/取消 ${rows.filter(r => r.status === 'error').length}`;
     document.getElementById('metric-requests').textContent = number(rows.length);
     document.getElementById('metric-running').textContent = `${rows.filter(r => r.status === 'running').length} / ${rows.filter(r => r.status === 'error').length}`;
     document.getElementById('metric-success').textContent = `已完成 ${rows.filter(r => r.status === 'done').length}`;
     document.getElementById('metric-tokens').textContent = measured.length ? number(sum(measured, r => r.usage.total_tokens)) : '—';
-    document.getElementById('metric-cache').textContent = measured.length ? `输入 ${number(sum(measured, r => r.usage.prompt_tokens))} · 输出 ${number(sum(measured, r => r.usage.completion_tokens))} · 缓存 ${number(sum(measured, r => r.usage.prompt_tokens_details?.cached_tokens))}` : '尚无已报告用量';
+    document.getElementById('metric-cache').textContent = measured.length ? `输入 ${number(sum(measured, r => r.usage.prompt_tokens + (r.usage.prompt_tokens_details?.cache_write_tokens === undefined ? r.usage.cache_creation_input_tokens || 0 : 0)))} · 输出 ${number(sum(measured, r => r.usage.completion_tokens))} · 缓存 ${number(sum(measured, r => r.usage.prompt_tokens_details?.cached_tokens))}` : '尚无已报告用量';
     document.getElementById('metric-cost').textContent = priced.length ? '$' + sum(priced, r => r.cost).toFixed(6) : '—';
-    document.getElementById('metric-cost-detail').textContent = `${priced.length} 条请求有估价；不是订阅实付`;
+    document.getElementById('metric-cost-detail').textContent = `${priced.length} 条请求有估价；${measured.filter(r => !r.complete).length} 条用量尚不完整；不是订阅实付`;
     document.getElementById('metric-coverage').textContent = `${terminal.filter(r => r.usage).length} / ${terminal.length}`;
     const bg = sum(rows, r => r.background?.total_tokens);
     document.getElementById('metric-background').textContent = rows.some(r => r.coverage?.includesBackground) ? `后台已报告 ${number(bg)} tokens（已含在合计）` : '后台用量未单列';
     const isMuse = src.id.includes('muse');
     document.getElementById('source-note').textContent = '汇总当前加载的最近请求，最多 1,000 条；不受文本筛选影响。' + (isMuse ? ' Muse 显示运行正文和工具详情；最终回复通过完成校验后交付。缺少服务端计数的调用不填零。' : ' 未提供价格或用量的请求单独留空。');
+    const accounting = document.getElementById('request-accounting'); accounting.replaceChildren();
+    const table = document.createElement('table');
+    const header = document.createElement('tr');
+    for (const label of ['请求','累计输入（含缓存）','缓存读 / 写','累计输出（含推理）','推理子集','上报上下文输入','刊例估价 / 计量状态']) {
+      const cell = document.createElement('th'); cell.textContent = label; header.appendChild(cell);
+    }
+    table.appendChild(header);
+    for (const [id,r] of [...src.state.requests].reverse()) {
+      const tr = document.createElement('tr'), u = r.usage;
+      const write = u?.prompt_tokens_details?.cache_write_tokens ?? u?.cache_creation_input_tokens ?? 0;
+      const input = u ? u.prompt_tokens + (u.prompt_tokens_details?.cache_write_tokens === undefined ? write : 0) : null;
+      const values = [id, input == null ? '—' : number(input), u ? `${number(u.prompt_tokens_details?.cached_tokens || 0)} / ${number(write)}` : '—', u ? number(u.completion_tokens) : '—', r.reasoning ?? u?.completion_tokens_details?.reasoning_tokens ?? '—', r.reported ? number(r.reported.prompt_tokens) : '—', `${r.cost == null ? '未定价' : '$'+r.cost.toFixed(6)} · ${u ? r.complete ? '已报告' : '部分 / 下限' : '未知'}`];
+      for (const value of values) { const cell = document.createElement('td'); cell.textContent = value; tr.appendChild(cell); }
+      tr.title = r.costBasis || '价格为参考估算；上报上下文输入与跨工具轮次累计输入口径不同。';
+      table.appendChild(tr);
+    }
+    accounting.appendChild(table);
     const models = new Map();
     for (const r of rows) {
       if (!models.has(r.model)) models.set(r.model, { count: 0, tokens: 0, context: r.context, bytes: r.bytes });
@@ -380,28 +476,12 @@
       appendHeader(src, tag, `init${init.length ? ' ' + init.join(' ') : ''}`, false);
     } else if (obj.event === 'model') {
       appendHeader(src, tag, `已确认模型 ${obj.model}${obj.sessionId ? ' · CLI 会话 ' + obj.sessionId : ''}`, false);
-    } else if (obj.event === 'tool_result') {
-      appendHeader(src, tag, `工具完成${obj.callId ? ' · ' + obj.callId : ''}`, false);
+    } else if (['tool','tool_args','tool_done','tool_error','tool_result'].includes(obj.event)) {
+      renderTool(src,tag,obj);
     } else if (obj.event === 'usage') {
-      const u = obj.usage;
-      const note = u ? `已报告用量：输入 ${number(u.prompt_tokens)}（缓存 ${number(u.prompt_tokens_details?.cached_tokens || 0)}）· 输出 ${number(u.completion_tokens)}（推理 ${number(u.completion_tokens_details?.reasoning_tokens || 0)}）` : '本请求没有可用的服务端 token 计数';
-      const price = Number.isFinite(obj.estimatedCostUsd) ? ` · 刊例估算 $${obj.estimatedCostUsd.toFixed(6)}` : '';
-      appendHeader(src, tag, note + price, false);
       if (obj.inputIntegrity?.verified === false) appendHeader(src, tag, '输入完整性未通过；不会把截短后的回答当作成功结果', true);
-    } else if (obj.event === 'tool') {
-      const args = obj.args ? ` ${obj.args}` : '';
-      const via = obj.via ? ` (via ${obj.via})` : '';
-      appendHeader(src, tag, `tool=${obj.name || 'unknown'}${obj.toolUseId ? ` id=${obj.toolUseId}` : ''}${args}${via}`, false);
-    } else if (obj.event === 'tool_done') {
-      const dur = Number.isFinite(obj.durationMs) ? ` ${obj.durationMs}ms` : '';
-      const out = obj.output ? ` → ${obj.output}` : '';
-      appendHeader(src, tag, `✓ ${obj.name || 'unknown'}${dur}${out}`, false);
-    } else if (obj.event === 'tool_error') {
-      appendHeader(src, tag, `tool_error=${obj.name || 'unknown'}${obj.error ? `: ${obj.error}` : ''}${obj.args ? ` args=${obj.args}` : ''}`, true);
     } else if (obj.event === 'done') {
-      const usage = obj.usage || {};
-      const tokens = Number.isFinite(usage.total_tokens) ? ` tokens=${usage.total_tokens}` : '';
-      appendHeader(src, tag, `done duration=${formatDuration(obj.durationMs)}${tokens}`, false);
+      appendHeader(src, tag, `完成 · ${formatDuration(obj.durationMs)}`, false);
     } else if (obj.event === 'error') {
       appendHeader(src, tag, `error${obj.code ? ` code=${obj.code}` : ''}: ${obj.message || 'unknown error'}`, true);
     } else if (obj.event === 'cancel') {
@@ -487,6 +567,7 @@
     active.container.innerHTML = '';
     st.sessions.clear();
     st.requests.clear();
+    st.tools.clear();
     renderMetrics(active);
     renderTabBadge(active);
     const requestSelect = document.getElementById('session-filter');

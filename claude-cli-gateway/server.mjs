@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { ClaudeUsageTracker } from "../lib/claude-usage.mjs";
+import { estimateUsageCost } from "../lib/usage-cost.mjs";
 
 import http from "node:http";
 import { StringDecoder } from "node:string_decoder";
@@ -6,7 +8,7 @@ import os from "node:os";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { normalizedClaudeUsage as normalizedUsage, contextClaudeUsage } from "../lib/cli-output.mjs";
+import { normalizedClaudeUsage as normalizedUsage, contextClaudeUsage, truncateText } from "../lib/cli-output.mjs";
 
 import { createCliVersionProbe } from "../lib/cli-version.mjs";
 import { createCliProcessCleanup } from "../lib/cli-process-cleanup.mjs";
@@ -552,6 +554,13 @@ function runClaude(job, callbacks) {
     // Per-model-call usage from assistant events; result.usage is their sum.
     let firstCallUsage = null;
     let lastCallUsage = null;
+    const usageTracker = new ClaudeUsageTracker(message => {
+      if (message.scope === "main") {
+        firstCallUsage ??= message.usage;
+        lastCallUsage = message.usage;
+      }
+      callbacks.onUsage?.(message);
+    });
 
     const cleanup = createCliProcessCleanup(child, { onForcedClose: error => finish(error) });
     const failure = (message, code, statusCode = 504) => Object.assign(new Error(message), { code, statusCode });
@@ -598,21 +607,22 @@ function runClaude(job, callbacks) {
         } catch {
           continue;
         }
+        usageTracker.accept(event);
         if (event.type === "stream_event") {
           const inner = event.event;
           if (inner?.type === "content_block_start") {
-            callbacks.onBlockStart?.(inner.content_block || {});
+            callbacks.onBlockStart?.(inner.content_block || {}, inner.index, event.parent_tool_use_id);
           } else if (inner?.type === "content_block_delta" && inner.delta?.type === "text_delta") {
             callbacks.onText?.(inner.delta.text || "");
           } else if (inner?.type === "content_block_delta" && inner.delta?.type === "thinking_delta") {
             callbacks.onThinking?.(inner.delta.thinking || "");
+          } else if (inner?.type === "content_block_delta" && inner.delta?.type === "input_json_delta") {
+            callbacks.onToolArgs?.(inner.index, inner.delta.partial_json || "", event.parent_tool_use_id);
           } else if (inner?.type === "content_block_stop") {
             callbacks.onBlockStop?.();
           }
         } else if (event.type === "assistant" && event.message?.id && event.message?.usage) {
-          firstCallUsage ??= event.message.usage;
-          lastCallUsage = event.message.usage;
-          callbacks.onUsage?.(event.message);
+          // Accounted above by message identity, including final stream deltas.
         } else if (event.type === "result") {
           resultEvent = event;
           callbacks.onResult?.(event);
@@ -632,7 +642,10 @@ function runClaude(job, callbacks) {
           const toolResults = Array.isArray(content)
             ? content.filter((block) => block?.type === "tool_result").length
             : 0;
-          if (toolResults > 0) callbacks.onToolResult?.(toolResults);
+          if (toolResults > 0) {
+            callbacks.onToolResult?.(toolResults);
+            for (const block of content.filter(b => b?.type === "tool_result")) callbacks.onToolDone?.(block);
+          }
         }
       }
     });
@@ -726,6 +739,7 @@ async function handleChatCompletion(req, res, body) {
     queuedMs,
   });
 
+  const logToolIds = new Map();
   const logCallbacks = {
     onChild: (_value, cancel) => { cancelChild = cancel; },
     onThinking: (text) => {
@@ -734,11 +748,15 @@ async function handleChatCompletion(req, res, body) {
     onText: (text) => {
       if (text) writeLiveLog(requestId, "text", { text });
     },
-    onBlockStart: (block) => {
+    onToolArgs: (index, text, parent) => writeLiveLog(requestId, "tool_args", { toolUseId: logToolIds.get(`${parent || "main"}:${index}`), index, text }),
+    onToolDone: (block) => writeLiveLog(requestId, block.is_error ? "tool_error" : "tool_done", { toolUseId: block.tool_use_id, output: truncateText(block.content, 12000) }),
+    onBlockStart: (block, index, parent) => {
       if (block?.type === "tool_use") {
+        logToolIds.set(`${parent || "main"}:${index}`, block.id);
         writeLiveLog(requestId, "tool", {
           name: block.name || "unknown",
-          toolUseId: block.id || null,
+          toolUseId: block.id || null, index,
+          args: block.input && Object.keys(block.input).length ? truncateText(block.input, 6000) : "",
         });
       }
     },
@@ -746,6 +764,8 @@ async function handleChatCompletion(req, res, body) {
     onUsage: (message) => writeLiveLog(requestId, "usage", {
       requestUuid, messageId: message.id, model: message.model || job.model,
       usage: normalizedUsage(message.usage),
+      usageScope: "model-call", usageComplete: message.complete, scope: message.scope,
+      ...estimateUsageCost("claude-cli-gateway", message.model || job.model, normalizedUsage(message.usage), { perCall: true }),
     }),
   };
 
@@ -753,7 +773,9 @@ async function handleChatCompletion(req, res, body) {
     writeLiveLog(requestId, "done", {
       requestUuid,
       durationMs: Date.now() - startedAt,
+      model: job.model, usageScope: "request", usageComplete: true,
       usage: normalizedUsage(result?.usage),
+      ...estimateUsageCost("claude-cli-gateway", job.model, normalizedUsage(result?.usage), { cliCost: result?.total_cost_usd }),
       // What OpenClaw was told; see contextClaudeUsage.
       usage_reported: contextClaudeUsage(result?.firstCallUsage, result?.usage),
       ...(result?.lastCallUsage ? { lastCallUsage: normalizedUsage(result.lastCallUsage) } : {}),
@@ -821,8 +843,8 @@ async function handleChatCompletion(req, res, body) {
       try {
         result = await runClaude(job, {
           ...logCallbacks,
-          onBlockStart: (block) => {
-            logCallbacks.onBlockStart(block);
+          onBlockStart: (block, index, parent) => {
+            logCallbacks.onBlockStart(block, index, parent);
             if (block?.type === "text") textBlockOpen = true;
             else if (block?.type === "tool_use") heartbeat(`[tool_use ${block.name || "unknown"}]`);
           },

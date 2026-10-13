@@ -149,7 +149,13 @@ class Evidence:
                     self.issue('conflicting_identity_usage', key)
                     return
             else:
+                # A final marker may arrive without changing counters. Preserve
+                # completion evidence across replay and source reconciliation.
+                if meta.get('usage_complete') is True:
+                    old['meta']['usage_complete'] = True
                 return
+        if old and old['meta'].get('usage_complete') is True:
+            rec['meta']['usage_complete'] = True
         self.records[key] = rec
 
     def usage(self, u, keys, label):
@@ -256,7 +262,7 @@ def scan_gateway(e, kind, split):
             u=o.get('usage') or {}; inp=u.get('prompt_tokens',0); cr=(u.get('prompt_tokens_details') or {}).get('cached_tokens',0)
             v=e.usage(dict(fresh=inp-cr,cw=u.get('cache_creation_input_tokens',0),cr=cr,out=u.get('completion_tokens',0)),FIELDS,rid)
             if v is not None and o.get('messageId'):
-                e.put('claude',o['messageId'],ts,'anthropic',o.get('model'),'openclaw',v,request=rid,unit='model-response')
+                e.put('claude',o['messageId'],ts,'anthropic',o.get('model'),'openclaw',v,request=rid,unit='model-response',usage_complete=o.get('usageComplete') is True)
             continue
         if typ != 'done' and not (typ=='error' and isinstance(o.get('usage'),dict)):
             if ts is not None and e.since <= ts <= e.until:
@@ -612,6 +618,9 @@ def reconcile(e):
     usage_v3.reconcile_dalton(e,active,held,gateways)
     from zcode_usage import reconcile_zcode
     reconcile_zcode(e, active, held)
+    for r in active.values():
+        if r['kind']=='claude' and r['meta'].get('request') and not r['meta'].get('usage_complete'):
+            e.issue('claude_gateway_partial_usage_lower_bound',r['id'])
     return list(active.values()),held
 
 

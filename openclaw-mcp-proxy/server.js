@@ -22,6 +22,9 @@ const { createPendingYieldStore } = require("./pending-yield-store");
 const { waitForYieldContinuation } = require("./direct-agent-continuation");
 const { readSqliteAssistantTexts, selectRunAssistantTexts } = require("./session-reply-store");
 const { createCraftBridge } = require("./craft-stdio.cjs");
+const { upstreamToolSelected } = require("./upstream-selection.cjs");
+const { createRequesterContext } = require("./requester-context.cjs");
+const { waitForSpawnedRuns } = require("./spawned-run-wait.cjs");
 
 const OPENCLAW_HOME = process.env.OPENCLAW_HOME
   || fspath.join(require("node:os").homedir(), ".openclaw");
@@ -277,94 +280,12 @@ const pendingYieldStore = createPendingYieldStore({
 });
 
 async function simulatedYield(timeoutMs, callerSessionKey) {
-  const maxWait = timeoutMs || 30 * 60 * 1000; // default 30 min
-  const pollInterval = 5000; // 5s
-  const startTime = Date.now();
-
-  const scopedSessionKey = normalizeOptionalSessionKey(callerSessionKey);
-  let pending = pendingYieldStore.read(scopedSessionKey);
-
-  // Fallback: if no captured runIds, check active subagent list
-  if (pending.length === 0) {
-    process.stderr.write("[openclaw-mcp] sessions_yield: no pending runIds in file, trying fallback\n");
-    let listResult;
-    try {
-      listResult = await invokeGatewayTool("subagents", { action: "list" }, scopedSessionKey);
-    } catch (e) {
-      return JSON.stringify({ status: "error", message: "Could not list subagents: " + e.message });
-    }
-    let parsed;
-    try {
-      parsed = typeof listResult === "string" ? JSON.parse(listResult) : listResult;
-      if (parsed?.content?.[0]?.text) { try { parsed = JSON.parse(parsed.content[0].text); } catch (_) {} }
-    } catch (_) {}
-    const active = Array.isArray(parsed?.active) ? parsed.active : [];
-    if (active.length === 0) {
-      return JSON.stringify({ status: "no_pending_subagent", message: "No active subagents found to yield on." });
-    }
-    pending = active.map(s => ({ runId: s.runId || s.id, sessionKey: scopedSessionKey || null })).filter(e => e.runId);
-    process.stderr.write("[openclaw-mcp] sessions_yield: fallback runIds=" + pending.map(e => e.runId).join(",") + "\n");
-  }
-
-  process.stderr.write("[openclaw-mcp] sessions_yield: waiting for " + pending.length + " subagent(s): " + pending.map(e => e.runId).join(",") + "\n");
-
-  const remaining = new Map(pending.map(e => [e.runId, e]));
-  const completedEntries = [];
-
-  // The gateway scopes `subagents list` to the requester session, so poll once
-  // per distinct sessionKey among pending entries (plus the caller's, as fallback).
-  const distinctKeys = [...new Set([...remaining.values()].map(e => e.sessionKey || scopedSessionKey || null))];
-
-  while (Date.now() - startTime < maxWait) {
-    const active = [];
-    const recent = [];
-    let anyListOk = false;
-    for (const key of distinctKeys) {
-      let listResult;
-      try {
-        listResult = await invokeGatewayTool("subagents", { action: "list" }, key || undefined);
-      } catch (e) { continue; }
-      let parsed;
-      try {
-        parsed = typeof listResult === "string" ? JSON.parse(listResult) : listResult;
-      } catch (_) { continue; }
-      anyListOk = true;
-      if (Array.isArray(parsed?.active)) active.push(...parsed.active);
-      if (Array.isArray(parsed?.recent)) recent.push(...parsed.recent);
-    }
-    if (!anyListOk) {
-      await new Promise(r => setTimeout(r, pollInterval));
-      continue;
-    }
-
-    for (const runId of [...remaining.keys()]) {
-      const isActive = active.some(s => s.runId === runId || s.id === runId);
-      if (!isActive) {
-        const completedEntry = recent.find(s => s.runId === runId || s.id === runId);
-        completedEntries.push({ runId, subagent: completedEntry || null });
-        remaining.delete(runId);
-        pendingYieldStore.remove(runId);
-        process.stderr.write("[openclaw-mcp] sessions_yield: subagent " + runId + " completed\n");
-      }
-    }
-
-    if (remaining.size === 0) {
-      return JSON.stringify({
-        status: "completed",
-        count: completedEntries.length,
-        elapsed: Math.round((Date.now() - startTime) / 1000) + "s",
-        subagents: completedEntries,
-      });
-    }
-
-    await new Promise(r => setTimeout(r, pollInterval));
-  }
-
-  return JSON.stringify({
-    status: "timeout",
-    pending: [...remaining.keys()],
-    message: "Some subagents did not complete within the timeout window.",
-  });
+  return JSON.stringify(await waitForSpawnedRuns({
+    entries: pendingYieldStore.read(callerSessionKey),
+    observe: waitForDirectContinuationRun,
+    remove: pendingYieldStore.remove,
+    timeoutMs: timeoutMs ?? Math.min(GATEWAY_TOOL_TIMEOUT_MS, 240000),
+  }));
 }
 
 // ── Tool definitions ─────────────────────────────────────────────────────────
@@ -485,15 +406,15 @@ const LOCAL_TOOL_DEFS = [
 const SESSIONS_YIELD_TOOL =
   {
     name: "sessions_yield",
-    description: "Suspend current turn and wait for the last spawned subagent to complete. Returns when done so the response routes back to the originating channel. Optional timeoutMs (default: 1800000 = 30min).",
+    description: "Wait for this MCP requester's accepted child runs and return their verified final replies in this tool response. No channel/main-session delivery. Timeout retains pending runs; call again without respawning. Default 240000ms; max 1800000ms.",
     inputSchema: {
       type: "object",
       properties: {
-        timeoutMs: { type: "number", description: "Max wait in milliseconds (default 1800000 = 30min)" },
+        timeoutMs: { type: "number", description: "Max wait in milliseconds (default 240000; maximum 1800000)" },
         sessionKey: {
           type: "string",
           description:
-            "Requester session key fallback for polling when no pending runIds were captured (normally unnecessary — spawn records each runId with its sessionKey).",
+            "Caller identity is bound by the MCP transport. Omit this field; another key is rejected. Only accepted runs recorded for this caller are observed.",
         },
       },
     },
@@ -599,11 +520,15 @@ const craftToolsReady = craftBridge.ready.then(() => {
   for (const tool of craftBridge.tools) if (!TOOLS.some(t => t.name === tool.name)) TOOLS.push(tool);
 });
 const upstreamToolsReady = (async () => {
+  const configuredServers = JSON.parse(fs.readFileSync(
+    fspath.join(OPENCLAW_HOME, "openclaw.json"), "utf8")).mcp?.servers || {};
   for (const upstream of UPSTREAM_MCP) {
+    if (configuredServers[upstream.name]?.enabled === false) continue;
     try {
       const result = await upstreamMcpRpc(upstream, "tools/list", {}, 5000);
       for (const t of result.tools || []) {
         if (Array.isArray(upstream.allowTools) && !upstream.allowTools.includes(t.name)) continue;
+        if (!upstreamToolSelected(configuredServers[upstream.name], t.name)) continue;
         const prefixed = upstream.prefix + t.name;
         if (!isToolAllowed(prefixed)) continue;
         if (TOOLS.some((d) => d.name === prefixed)) continue;
@@ -969,13 +894,12 @@ function normalizeOptionalSessionKey(v) {
   return s && s !== "main" ? s : undefined;
 }
 
-// The Claude CLI gateway extracts the originating OpenClaw session from the
-// system prompt and passes it to this MCP child process. Model-provided
-// sessionKey still wins, but the environment fallback keeps subagent announce
-// routing correct without requiring the model to repeat hidden runtime data.
-const DEFAULT_REQUESTER_SESSION_KEY = normalizeOptionalSessionKey(
-  process.env.OPENCLAW_REQUESTER_SESSION_KEY
-);
+// Caller identity is owned by the gateway transport, not model-supplied args.
+const requesterContext = createRequesterContext({
+  sessionKey: process.env.OPENCLAW_REQUESTER_SESSION_KEY,
+  agentId: gwConfig.requesterAgentId,
+});
+const DEFAULT_REQUESTER_SESSION_KEY = requesterContext.sessionKey;
 
 function normalizeToolArgs(toolName, args) {
   const input = args || {};
@@ -1610,7 +1534,7 @@ function invokeGatewayTool(toolName, args, sessionKey) {
     // sessionKey at body top level identifies the requester session to the gateway
     // (tools-invoke-shared resolveSessionKey). Without it the gateway falls back to
     // agent:main:main, which breaks subagent announce routing (spawnedBy mis-recorded).
-    const payload = { tool: toolName, args: args || {} };
+    const payload = { tool: toolName, args: args || {}, idempotencyKey: randomUUID() };
     if (sessionKey) payload.sessionKey = sessionKey;
     // 2026.8+ requires a named owner when the requester key is unscoped.
     // Agent-prefixed keys retain their own owner (including non-main agents).
@@ -1783,12 +1707,11 @@ async function handleRequest(msg) {
       } else if (upstreamToolRoutes.has(name)) {
         result = await invokeUpstreamTool(name, args);
       } else if (name === "sessions_yield") {
-        // Simulated blocking yield: poll subagents list until last spawned runId is done.
-        // This keeps the current Claude Code turn open, so the response routes back to the
-        // originating channel (Discord) rather than falling back to webchat.
+        // Return exact terminal replies here; never infer completion from a list
+        // disappearance or depend on a host main-session notification.
         result = await simulatedYield(
           args?.timeoutMs,
-          normalizeOptionalSessionKey(args?.sessionKey) || DEFAULT_REQUESTER_SESSION_KEY
+          requesterContext.resolve(args?.sessionKey)
         );
       } else {
         let normalizedArgs = normalizeToolArgs(name, args);
@@ -1803,10 +1726,16 @@ async function handleRequest(msg) {
         // environment-provided requester identity is sent separately here.
         let hoistedSessionKey = DEFAULT_REQUESTER_SESSION_KEY;
         if (SESSION_IDENTITY_TOOLS.has(name) && normalizedArgs && normalizedArgs.sessionKey !== undefined) {
-          hoistedSessionKey = normalizeOptionalSessionKey(normalizedArgs.sessionKey)
-            || DEFAULT_REQUESTER_SESSION_KEY;
+          hoistedSessionKey = requesterContext.resolve(normalizedArgs.sessionKey);
           const { sessionKey: _drop, ...rest } = normalizedArgs;
           normalizedArgs = rest;
+        }
+        if (name === "sessions_spawn" && normalizedArgs.expectsCompletionMessage === undefined
+          && !normalizedArgs.completionTarget && !normalizedArgs.collect && !normalizedArgs.visible
+          && !normalizedArgs.thread && normalizedArgs.mode !== "session" && normalizedArgs.runtime !== "acp") {
+          // MCP callers retrieve the exact child reply with sessions_yield;
+          // avoid a second automatic host-agent/channel completion turn.
+          normalizedArgs = { ...normalizedArgs, expectsCompletionMessage: false };
         }
         result = await invokeGatewayTool(name, normalizedArgs, hoistedSessionKey);
 
@@ -1818,8 +1747,8 @@ async function handleRequest(msg) {
             if (!obj?.runId && obj?.content?.[0]?.text) {
               try { obj = JSON.parse(obj.content[0].text); } catch (_) {}
             }
-            if (obj?.runId) {
-              pendingYieldStore.write(obj.runId, hoistedSessionKey);
+            if (obj?.status === "accepted" && obj?.runId && obj?.childSessionKey) {
+              pendingYieldStore.write(obj.runId, hoistedSessionKey, { childSessionKey: obj.childSessionKey });
               process.stderr.write("[openclaw-mcp] sessions_spawn: captured runId=" + obj.runId + " sessionKey=" + (hoistedSessionKey || "(none)") + "\n");
             } else {
               process.stderr.write("[openclaw-mcp] sessions_spawn: no runId found in result: " + JSON.stringify(obj).slice(0, 300) + "\n");
@@ -1829,6 +1758,9 @@ async function handleRequest(msg) {
           }
         }
       }
+      // Native MCP-shaped results may contain images and tool-level errors.
+      // Preserve them rather than double-wrapping as successful JSON text.
+      if (result && typeof result === "object" && Array.isArray(result.content)) return reply(id, result);
       const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
       const response = {
         content: [{ type: "text", text }],

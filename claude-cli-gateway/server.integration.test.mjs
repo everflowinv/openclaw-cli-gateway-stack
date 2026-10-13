@@ -80,6 +80,17 @@ process.stdin.on("end", () => {
     console.log(JSON.stringify({type:'result',subtype:'error',is_error:true,result:'fixture failed'}));
     setInterval(()=>{},1000); return;
   }
+  if (input.includes('partial-usage-case')) {
+    const message={id:'partial-usage',model:'claude-opus-5-5',usage:{input_tokens:10,cache_read_input_tokens:30,cache_creation_input_tokens:20,output_tokens:1}};
+    console.log(JSON.stringify({type:'stream_event',event:{type:'message_start',message}}));
+    console.log(JSON.stringify({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'tool_use',id:'tool-1',name:'read',input:{}}}}));
+    console.log(JSON.stringify({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:'{"path":"fixture"}'}}}));
+    console.log(JSON.stringify({type:'stream_event',event:{type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:150}}}));
+    console.log(JSON.stringify({type:'assistant',message}));
+    console.log(JSON.stringify({type:'user',message:{content:[{type:'tool_result',tool_use_id:'tool-1',content:'FIXTURE_OUTPUT'}]}}));
+    console.log(JSON.stringify({type:'result',subtype:'error',is_error:true,result:'fixture interruption'}));
+    return;
+  }
   if (input.includes('too-long-case')) {
     console.log(JSON.stringify({type:'result',subtype:'error',is_error:true,result:'Prompt is too long · the request is ~1071529 tokens (limit 1000000)'}));
     return;
@@ -205,6 +216,15 @@ process.stdin.on("end", () => {
     const structured = await requestJson(port, 'POST', '/v1/chat/completions', { ...requestBody, messages: [{ role: 'user', content: 'structured-case' }], response_format: { type: 'json_schema', json_schema: { schema: { type: 'object', properties: { a: { type: 'string' } } } } } });
     assert.equal(structured.status, 200);
     assert.equal(structured.body.choices[0].message.content, '{"a":"hello"}');
+    const partial = await requestJson(port, 'POST', '/v1/chat/completions', { ...requestBody, messages:[{role:'user',content:'partial-usage-case'}] });
+    assert.equal(partial.status, 502);
+    const usageEvents = stdout.split('\n').filter(line => line.startsWith('[CLIGW] ')).map(line => JSON.parse(line.slice(8)));
+    const partialUsage = usageEvents.filter(e => e.messageId === 'partial-usage');
+    assert.equal(partialUsage.length, 2);
+    assert.equal(partialUsage.at(-1).usage.completion_tokens, 150);
+    assert.equal(partialUsage.at(-1).usageComplete, true);
+    assert.ok(usageEvents.some(e => e.event === 'tool_args' && e.toolUseId === 'tool-1'));
+    assert.ok(usageEvents.some(e => e.event === 'tool_done' && e.output === 'FIXTURE_OUTPUT'));
     // Terminal failures classify like a normal provider.
     const tooLong = await requestJson(port, 'POST', '/v1/chat/completions', { ...requestBody, messages: [{ role: 'user', content: 'too-long-case' }] });
     assert.equal(tooLong.status, 413, JSON.stringify(tooLong.body));

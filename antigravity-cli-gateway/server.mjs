@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { estimateUsageCost } from "../lib/usage-cost.mjs";
 // Antigravity CLI Gateway — OpenAI-compatible façade over `agy` print mode.
 // Modeled on claude-cli-gateway/server.mjs; see README.md for differences
 // (text-only input, step-granularity streaming, per-model effort suffixes).
@@ -738,6 +739,8 @@ async function handleChatCompletion(req, res, body) {
     writeLiveLog(requestId, "done", {
       requestUuid,
       usageSchema: "agy-output-includes-thinking-v1",
+      model: job.clientModel || job.model, usageScope: "request", usageComplete: true,
+      ...estimateUsageCost("antigravity-cli-gateway", job.clientModel || job.model, normalizedUsage(result?.usage)),
       conversationId: result?.conversation_id || null,
       durationMs: Date.now() - startedAt,
       usage: normalizedUsage(result?.usage),
@@ -755,6 +758,7 @@ async function handleChatCompletion(req, res, body) {
     writeLiveLog(requestId, "error", {
       durationMs: Date.now() - startedAt,
       code: error?.code || "agy_cli_error",
+      ...(error?.resultEvent?.usage ? { usage: normalizedUsage(error.resultEvent.usage), usage_raw: rawUsage(error.resultEvent.usage), usageScope: "request" } : {}),
       message: sanitizeError(error?.message || String(error)),
     });
   };

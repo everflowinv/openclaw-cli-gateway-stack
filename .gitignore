@@ -7,3 +7,6 @@ antigravity-cli-gateway/websearch-cwd/
 !antigravity-cli-gateway/cwd/.gitkeep
 claude-cli-gateway/mcp.json
 .DS_Store
+
+/output/playwright/
+/.playwright-cli/

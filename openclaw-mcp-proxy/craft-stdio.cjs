@@ -5,7 +5,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const readline = require("node:readline");
-const CRAFT_SERVERS = ["gridcraft", "wordcraft", "pdfcraft"];
+// Explicit allowlist of local stdio services; arbitrary configured servers
+// are not exposed to external clients by this bridge.
+const CRAFT_SERVERS = ["gridcraft", "wordcraft", "pdfcraft", "researchdata"];
 
 class StdioClient {
   constructor(config) {
@@ -88,7 +90,7 @@ function createCraftBridge({ openclawHome, disabled = false, allowlist = new Set
     await Promise.all(CRAFT_SERVERS.map(async name => {
       const entry = config.mcp?.servers?.[name];
       const prefix = name + "__";
-      if (!entry || entry.enabled === false || entry.transport !== "stdio" || !entry.command) return;
+      if (!entry || entry.enabled === false || (entry.transport && entry.transport !== "stdio") || !entry.command) return;
       if (allowlist.size && ![...allowlist].some(tool => tool.startsWith(prefix))) return;
       const client = new StdioClient(entry);
       clients.push(client);

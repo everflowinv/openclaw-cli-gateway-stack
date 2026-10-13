@@ -18,6 +18,7 @@ function normalizedEntry(value) {
   return {
     runId: String(value.runId),
     sessionKey: normalizedSessionKey(value.sessionKey),
+    ...(typeof value.childSessionKey === "string" ? { childSessionKey: value.childSessionKey } : {}),
     createdAt: typeof value.createdAt === "string" ? value.createdAt : undefined,
   };
 }
@@ -77,13 +78,14 @@ function createPendingYieldStore({ dir, legacyFile }) {
     return [...entries.values()];
   }
 
-  function write(runId, sessionKey) {
+  function write(runId, sessionKey, details = {}) {
     if (!runId) return;
     ensureDir();
     const entry = {
       runId: String(runId),
       sessionKey: normalizedSessionKey(sessionKey),
       createdAt: new Date().toISOString(),
+      ...(typeof details.childSessionKey === "string" ? { childSessionKey: details.childSessionKey } : {}),
     };
     const destination = entryPath(entry.runId);
     const temporary = path.join(

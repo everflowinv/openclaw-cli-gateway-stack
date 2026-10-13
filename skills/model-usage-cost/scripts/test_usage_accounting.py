@@ -87,6 +87,16 @@ class Accounting(unittest.TestCase):
     def test_invalid_tokens_are_not_silently_zero(self):
         for x in [True,False,-1,float('nan'),float('inf'),'100',1.2]:
             with self.subTest(x=x),self.assertRaises(ValueError):s.vector({'input':x},('input','output'))
+    def test_partial_gateway_usage_is_deduplicated_and_final_evidence_survives(self):
+        def row(out,complete=False):
+            return dict(event='usage',request='r',messageId='msg',model='m',ts=iso(NOW-10),usageComplete=complete,usage={'prompt_tokens':100,'prompt_tokens_details':{'cached_tokens':50},'completion_tokens':out})
+        self.attach('claude-gateway',write(self.p/'gateway.log',[row(1),row(50),row(50,True),row(1)],'[CLIGW] '))
+        e=self.e();s.scan_gateway(e,'claude-gateway',cli.DEFAULT_SPLIT)
+        rs,_=s.reconcile(e);self.assertEqual(s.summed(rs),(50,0,50,50));self.assertTrue(rs[0]['meta']['usage_complete'])
+        self.assertEqual(e.issues['claude_gateway_partial_usage_lower_bound'],0)
+    def test_legacy_partial_gateway_usage_is_explicit_lower_bound(self):
+        e=self.e();e.put('claude','msg',NOW-10,'anthropic','m','openclaw',(10,0,0,1),request='r',unit='model-response')
+        rs,_=s.reconcile(e);self.assertEqual(len(rs),1);self.assertEqual(e.issues['claude_gateway_partial_usage_lower_bound'],1)
     def test_legacy_gateway_split_preserves_prompt_total(self):
         rows=[dict(event='start',request='r',model='m',ts=iso(NOW-20)),dict(event='done',request='r',ts=iso(NOW-10),usage={'prompt_tokens':101,'completion_tokens':2})]
         self.attach('claude-gateway',write(self.p/'gateway.log',rows,'[CLIGW] '))

@@ -19,7 +19,7 @@ async function main() {
       const call = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       calls.push(call);
       if (call.args?.integrationHang === true) return;
-      const payload = JSON.stringify({ ok: true, result: { active: [], recent: [] } });
+      const payload = JSON.stringify({ ok: true, result: call.tool === "sessions_spawn" ? { status: "accepted", runId: "fixture-child", childSessionKey: "agent:main:subagent:fixture" } : { active: [], recent: [] } });
       res.writeHead(200, { "content-type": "application/json" });
       res.end(payload);
     });
@@ -155,8 +155,8 @@ process.stdout.write(JSON.stringify({ ok: true, key: params.key, sessionId: "fak
     assert.ok(message.inputSchema.properties.to);
     assert.ok(message.inputSchema.properties.filePath);
     assert.ok(message.inputSchema.properties.components);
-    assert.deepStrictEqual(spawnTool.inputSchema.properties.mode.enum, ["run", "session"]);
-    assert.strictEqual(spawnTool.inputSchema.properties.thread.type, "boolean");
+    assert.ok(spawnTool.inputSchema.properties.mode.enum.includes("run"));
+    assert.equal(spawnTool.inputSchema.properties.thread, undefined, "HTTP requester has no channel thread binding");
     assert.match(execTool.description, /Do not use shell backgrounding/);
     assert.strictEqual(execTool.inputSchema.properties.timeoutMs.type, "number");
 
@@ -187,7 +187,7 @@ process.stdout.write(JSON.stringify({ ok: true, key: params.key, sessionId: "fak
 
     const yielded = await request(2, "sessions_yield", { timeoutMs: 100 });
     assert.strictEqual(yielded.result.isError, false, stderr);
-    assert.strictEqual(calls[1].sessionKey, requester);
+    assert.strictEqual(calls.length, 1, "yield without accepted children must not query the main session");
     assert.match(yielded.result.content[0].text, /no_pending_subagent/);
 
     const gatewayTimeoutStartedAt = Date.now();
@@ -199,14 +199,23 @@ process.stdout.write(JSON.stringify({ ok: true, key: params.key, sessionId: "fak
     assert.match(gatewayTimedOut.result.content[0].text, /Gateway request timed out after 100ms/);
     assert.ok(Date.now() - gatewayTimeoutStartedAt < 2000);
 
-    const unscoped = await request(150, "subagents", { action: "list", sessionKey: "legacy-upgrade-test" });
-    assert.strictEqual(unscoped.result.isError, false, stderr);
-    assert.strictEqual(calls.at(-1).agentId, "main", "unscoped request requires explicit owner");
-    assert.strictEqual(calls.at(-1).sessionKey, "legacy-upgrade-test");
-    const otherAgent = await request(151, "subagents", { action: "list", sessionKey: "agent:marco:main" });
-    assert.strictEqual(otherAgent.result.isError, false, stderr);
-    assert.strictEqual(calls.at(-1).agentId, undefined, "main fallback must not override another agent");
-    assert.strictEqual(calls.at(-1).sessionKey, "agent:marco:main");
+    for (const sessionKey of ["legacy-upgrade-test", "agent:marco:main", "agent:main:main"]) {
+      const count = calls.length;
+      const rejected = await request(150, "subagents", { action: "list", sessionKey });
+      assert.strictEqual(rejected.result.isError, true);
+      assert.match(rejected.result.content[0].text, /bound by the MCP transport/);
+      assert.strictEqual(calls.length, count);
+    }
+    const spawned = await request(152, "sessions_spawn", { task: "synthetic fixture only" });
+    assert.equal(spawned.result.isError, false);
+    assert.equal(calls.at(-1).sessionKey, requester);
+    assert.equal(calls.at(-1).args.expectsCompletionMessage, false);
+    assert.ok(calls.at(-1).idempotencyKey);
+    const childResult = await request(153, "sessions_yield", { timeoutMs: 3000 });
+    const joined = JSON.parse(childResult.result.content[0].text);
+    assert.equal(joined.status, "completed");
+    assert.equal(joined.subagents[0].runId, "fixture-child");
+    assert.equal(joined.subagents[0].reply, "later-parent-final");
 
     const restrictedTarget = "agent:main:codex-desktop-lumos";
     const restrictedChild = spawn(process.execPath, [path.join(__dirname, "server.js")], {

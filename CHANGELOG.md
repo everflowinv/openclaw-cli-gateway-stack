@@ -2,6 +2,21 @@
 
 ## 2026.10.13
 
+- Audit 451 AGY request totals against native conversation databases: all
+  matched; cached input and reasoning are counted once. Capture Claude final
+  streamed message usage, preserve it across stale assistant replays, and
+  disclose unreconciled historical partial observations as lower bounds.
+- Fold viewer accounting by default; merge tool arguments/results into
+  expandable rows across all CLI tabs. Deduplicate message usage and replace
+  it with final request totals; label price estimates separately from charges.
+- Bind MCP requester identity to its transport, isolate unbound clients, and
+  return exact spawned-run terminal replies through `sessions_yield`. Default
+  hidden runs to quiet completion; retain pending runs on observation timeout.
+  Regenerate schemas from installed OpenClaw 2026.9.9 without unsupported
+  HTTP thread/session overlays. Preserve native MCP errors and image content.
+- Preserve and validate pending upstream tool selection / ResearchData stdio
+  changes. See `docs/cli-accounting-routing-2026-10-13.md` for evidence.
+
 - Finish the interrupted Muse bridge update: raise the complete prompt's
   UTF-8 cap from 1,400,000 to 1,900,000 bytes after four-model marker and
   journal-preservation probes; keep the 384,000-token safe context.

@@ -302,23 +302,18 @@ const PROPERTY_OVERLAYS = {
     sessionKey: {
       type: "string",
       description:
-        "Requester session key (NOT the child session). The Claude CLI gateway supplies this automatically; pass it only when an explicit requester override is required.",
+        "Requester identity supplied by the MCP transport. Omit this field; a different key is rejected. This is NOT the child session target.",
     },
-    thread: {
+    expectsCompletionMessage: {
       type: "boolean",
-      description: "Bind the spawned session to a supported chat thread.",
-    },
-    mode: {
-      type: "string",
-      enum: ["run", "session"],
-      description: "run is one-shot; session is persistent and requires thread=true.",
+      description: "For ordinary hidden runs the MCP bridge defaults this to false: retrieve the final child reply using sessions_yield in this caller. Set true only to explicitly request native host completion delivery.",
     },
   },
   subagents: {
     sessionKey: {
       type: "string",
       description:
-        "Requester session key scoping the list (e.g. agent:main:discord:channel:<id>). Pass the same key used at sessions_spawn; omit to scope to the main session.",
+        "Caller identity is bound by the MCP transport. Omit this field to list this caller's children; a different key is rejected. Never defaults to the main session.",
     },
   },
   // Back-compat aliases normalized by server.js before forwarding; declared so
