@@ -68,6 +68,13 @@ worktrees and restart the service after merging. `claude-cli-gateway/mcp.json`
 stays gitignored and machine-local. The pre-migration
 `~/.openclaw/workspace/scripts/` copies were deleted after verification.
 
+## Security
+
+This stack runs privileged local tools and is intended for trusted local clients.
+Keep its HTTP services on loopback and keep credentials and production logs out
+of Git. See [SECURITY.md](SECURITY.md) for the trust boundary and private
+vulnerability reporting.
+
 ## Prerequisites
 
 - macOS (launchd integration; the servers themselves run anywhere with

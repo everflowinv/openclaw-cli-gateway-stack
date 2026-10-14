@@ -10,3 +10,37 @@ claude-cli-gateway/mcp.json
 
 /output/playwright/
 /.playwright-cli/
+
+# Credentials and machine-local configuration (examples stay publishable).
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+credentials.*.json
+secrets.json
+secrets.*.json
+openclaw.json
+mcp.json
+mcp_config.json
+service-env/
+
+# Private runtime data, transcripts, reports and backups.
+.venv/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log.*
+*.bak
+*.bak.*
+logs/
+backups/
+/output/
