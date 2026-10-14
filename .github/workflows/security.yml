@@ -37,3 +37,5 @@ jobs:
       - name: Scan all fetched history
         shell: bash
         run: '"$RUNNER_TEMP/gitleaks" git --log-opts="--all" --redact --no-banner .'
+      - name: Run web-search plugin security regressions
+        run: node --test antigravity-cli-gateway/openclaw-plugin/index.test.mjs

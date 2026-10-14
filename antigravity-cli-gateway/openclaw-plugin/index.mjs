@@ -34,10 +34,16 @@ const TOOL_PARAMETERS = {
   required: ["query"],
 };
 
+function stripTrailingSlashes(value) {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end--;
+  return value.slice(0, end);
+}
+
 function resolveConfig(rawConfig) {
   const config = rawConfig && typeof rawConfig === "object" && !Array.isArray(rawConfig) ? rawConfig : {};
   const baseUrl = typeof config.baseUrl === "string" && config.baseUrl.trim()
-    ? config.baseUrl.replace(/\/+$/, "")
+    ? stripTrailingSlashes(config.baseUrl)
     : "http://127.0.0.1:4570";
   const timeoutSeconds = Number.isSafeInteger(config.timeoutSeconds) && config.timeoutSeconds >= 5 && config.timeoutSeconds <= 240
     ? config.timeoutSeconds
