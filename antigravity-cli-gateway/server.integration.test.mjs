@@ -153,7 +153,7 @@ process.stdin.on("end", async () => {
     assert.equal(health.structuredOutput, true);
     assert.equal(health.permissionMode, "dangerously-skip-permissions");
     const models = await requestJson(port, "GET", "/v1/models");
-    assert.deepEqual(models.body.data.map(m => m.id), ["gemini-3.8-flash", "claude-opus-5-5", "claude-sonnet-5-5", "gpt-oss-120b"]);
+    assert.deepEqual(models.body.data.map(m => m.id), ["gemini-4-argon", "gemini-3.8-flash", "claude-opus-5-5", "claude-sonnet-5-5", "gpt-oss-120b"]);
     assert.deepEqual(models.body.data.at(-1).reasoning_efforts, ["medium"]);
     for (const stream of [false, true]) {
       const rejected = await send([{role:"user",content:"x".repeat(10001)}], stream);
@@ -202,6 +202,9 @@ process.stdin.on("end", async () => {
     assert.equal(multiDone.lastCallUsage.cache_read_tokens, 20000);
     const lastCall = () => JSON.parse(fs.readFileSync(calls,'utf8').trim().split('\n').at(-1));
     for (const [model, effort, expectedModelId] of [
+      ['gemini-4-argon','low','gemini-4-argon-low'],
+      ['gemini-4-argon','medium','gemini-4-argon-medium'],
+      ['gemini-4-argon','max','gemini-4-argon-high'],
       ['gemini-3.8-flash','medium','gemini-3.8-flash-medium'],
       ['gemini-3.8-flash','xhigh','gemini-3.8-flash-high'],
       ['gemini-3.8-flash-low',undefined,'gemini-3.8-flash-low'],

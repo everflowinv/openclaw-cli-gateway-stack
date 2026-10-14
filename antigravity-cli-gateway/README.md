@@ -39,7 +39,7 @@ same subscription-grounded search as a standalone web-search endpoint — see
   OpenClaw's thinking level arrives as OpenAI `reasoning_effort`, clamps
   into the model's catalogued efforts (`none`/`minimal`/`off` → lowest,
   `xhigh`/`max`/`ultra` → highest, absent →
-  `AGY_CLI_GATEWAY_DEFAULT_EFFORT`), and is sent as agy 1.3.3's canonical
+  `AGY_CLI_GATEWAY_DEFAULT_EFFORT`), and is sent as agy 1.3.4's canonical
   suffixed model id (`--model gemini-3.8-flash-high`, no `--effort` flag —
   the old base-plus-flag form is intermittently rejected upstream). The
   openclaw.json model entry declares
@@ -74,14 +74,42 @@ same subscription-grounded search as a standalone web-search endpoint — see
 
 ## Model catalog
 
-`agy models` lists what the account can use (agy 1.3.3, verified
-2026-10-12). Exposed here, with the efforts each catalog entry offers:
-`gemini-3.8-flash`, `claude-opus-5-5` and `claude-sonnet-5-5`
+`agy models` lists what the account can use (agy 1.3.4, verified
+2026-10-13). Exposed here, with the efforts each catalog entry offers:
+`gemini-4-argon`, `gemini-3.8-flash`, `claude-opus-5-5` and `claude-sonnet-5-5`
 (low/medium/high), plus `gpt-oss-120b` (medium only — every thinking level
 lands on medium). `gemini-3.1-pro` is no longer recognized by the CLI at
 all and was removed from the gateway and from openclaw.json. To add a
 model, add its base id plus catalogued efforts to `MODELS` in `server.mjs`
 and register the same id in openclaw.json.
+
+### Gemini 4 Argon
+
+OpenClaw alias `ArgonAGY` selects this subscription bridge. The separate
+`GeminiArgon` alias selects `google/gemini-4-argon` directly through the Google
+API. Both returned `ARGON-PROOF-OK` through OpenClaw on 2026-10-13 with the
+requested provider/model and no fallback.
+
+The model has a **1,048,576-token unified context** (input, thinking and output
+share it). The Google streaming endpoint accepts **65,536** output tokens per
+request; non-streaming is limited to 32,768. Million-token output requires
+the long-decode continuation protocol, which this integration does not add.
+The CLI bridge remains text-only and retains its **190,000 UTF-8 byte prompt
+cap**, including history and framing. The underlying model's 1M catalog window
+does not bypass that cap; use the direct Google route for long inputs. The CLI
+does not enforce the OpenAI `max_tokens` field.
+
+Catalog cost uses the official standard API reference rate, not the actual
+Antigravity subscription bill: USD **2 input / 10 output / 0.10 cached input**
+per million tokens through **2026-11-30**. From **2026-12-01**, the announced
+rate is **4 / 20 / 0.20**. The current static catalog does not switch rates
+automatically. Explicit cache creation is unsupported; `cacheWrite: 0` is an
+unused field, not a free-cache-storage claim.
+
+Official sources checked 2026-10-13:
+- https://aistudio.google.com/docs/models/gemini-4-argon
+- https://aistudio.google.com/docs/pricing#gemini-4-argon
+- https://aistudio.google.com/docs/long-decode
 
 ## Service operations
 

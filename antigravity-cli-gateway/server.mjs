@@ -69,8 +69,8 @@ const STALL_TIMEOUT_MS = numberFromEnv("AGY_CLI_GATEWAY_STALL_SECONDS", 600, 1, 
 const HEARTBEAT_IDLE_MS = numberFromEnv("AGY_CLI_GATEWAY_HEARTBEAT_SECONDS", 120, 0, 3600) * 1000;
 const LIVE_LOG_PREFIX = "[AGYGW]";
 
-// One catalog entry per base model, mirroring `agy models` on agy 1.3.3
-// (verified 2026-10-12: suffixed ids only; gemini-3.1-pro is no longer
+// One catalog entry per base model, mirroring `agy models` on agy 1.3.4
+// (verified 2026-10-13: suffixed ids only; gemini-3.1-pro is no longer
 // recognized at all and was removed). Reasoning effort arrives per-request
 // as OpenAI `reasoning_effort` (OpenClaw thinking level); agy's canonical
 // selection is now the suffixed model id ("gemini-3.8-flash-low"), so the
@@ -81,6 +81,7 @@ const LIVE_LOG_PREFIX = "[AGYGW]";
 // request overrides it. `agy --help` advertises xhigh/max, but the live
 // catalog only offers the efforts listed per model below.
 const MODELS = new Map([
+  ["gemini-4-argon", { id: "gemini-4-argon", agyModel: "gemini-4-argon", agyEfforts: ["low", "medium", "high"], created: 1791907200, input: ["text"], reasoning: true }],
   ["gemini-3.8-flash", { id: "gemini-3.8-flash", agyModel: "gemini-3.8-flash", agyEfforts: ["low", "medium", "high"], created: 1784851200, input: ["text"], reasoning: true }],
   ["claude-opus-5-5", { id: "claude-opus-5-5", agyModel: "claude-opus-5-5", agyEfforts: ["low", "medium", "high"], created: 1784851200, input: ["text"], reasoning: true }],
   ["claude-sonnet-5-5", { id: "claude-sonnet-5-5", agyModel: "claude-sonnet-5-5", agyEfforts: ["low", "medium", "high"], created: 1784851200, input: ["text"], reasoning: true }],
