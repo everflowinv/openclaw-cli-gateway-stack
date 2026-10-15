@@ -175,7 +175,11 @@ function localToolLogFields(args) {
 function isToolAllowed(name) {
   if (DYNAMIC_SESSIONS_ENABLED && !DYNAMIC_DESKTOP_TOOLS.has(name)) return false;
   if (name === "sessions_start" && !DYNAMIC_SESSIONS_ENABLED) return false;
-  return CONFIGURED_TOOL_ALLOWLIST.size === 0 || CONFIGURED_TOOL_ALLOWLIST.has(name);
+  if (CONFIGURED_TOOL_ALLOWLIST.size === 0 || CONFIGURED_TOOL_ALLOWLIST.has(name)) return true;
+  // "<server>__*" admits one bridged MCP catalog (gateways send it for
+  // OpenClaw Tool Search runs whose deferred catalog includes MCP tools).
+  const separator = name.indexOf("__");
+  return separator > 0 && CONFIGURED_TOOL_ALLOWLIST.has(name.slice(0, separator + 2) + "*");
 }
 
 // ── Config ──────────────────────────────────────────────────────────────────

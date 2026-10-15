@@ -396,7 +396,7 @@ function translateRequest(body) {
     promptContent,
     systemPrompt,
     requesterSessionKey,
-    allowedTools: resolveAllowedTools(body, KNOWN_TOOLS),
+    allowedTools: resolveAllowedTools(body, KNOWN_TOOLS, systemPrompt),
     jsonSchema: jsonSchema ? JSON.stringify(jsonSchema) : null,
     imageCount: imageTracker.count,
     imageBytes: imageTracker.totalBytes,

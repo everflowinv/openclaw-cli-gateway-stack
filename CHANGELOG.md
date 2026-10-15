@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026.10.15
+
+- Restore deferred tools on OpenClaw Tool Search runs. Since 10-13 the
+  per-request allowlist kept only directly sent tools, and OpenClaw (Tool
+  Search on by default) sends just its core tools plus `tool_search` /
+  `tool_describe` / `tool_call`, so Claude, AGY and Muse lanes lost
+  `web_search`, `message`, `researchdata__*` and every other deferred tool.
+  When `tool_call` is present the gateways now rebuild the deferred catalog
+  from OpenClaw's system-prompt directory (listed OpenClaw names; bridged MCP
+  catalogs only when the directory reports unlisted entries). The proxy
+  allowlist accepts `<server>__*` for one bridged catalog. No directory keeps
+  the direct set. Claude CLI still defers the schemas through its ToolSearch.
+
 ## 2026.10.13
 
 - Audit 451 AGY request totals against native conversation databases: all

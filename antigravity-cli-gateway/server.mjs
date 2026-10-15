@@ -365,7 +365,7 @@ function translateRequest(body) {
     requestedEffort: body.reasoning_effort ?? body.reasoning?.effort ?? null,
     prompt,
     requesterSessionKey: extractRequesterSessionKey(systemParts.join("\n\n")),
-    allowedTools: resolveAllowedTools(body, KNOWN_TOOLS),
+    allowedTools: resolveAllowedTools(body, KNOWN_TOOLS, systemParts.join("\n\n")),
     jsonSchema: jsonSchema ? JSON.stringify(jsonSchema) : null,
     stream: body.stream === true,
     includeUsage: body.stream_options?.include_usage === true,
